@@ -27,7 +27,7 @@ class Priority(Enum):
 
 @dataclass
 class Container:
-    """Класс для представления тары"""
+    """Класс для представления тары/коробки"""
     id: str
     name: str
     weight: float  # кг
@@ -38,6 +38,8 @@ class Container:
     priority_parts: bool = False
     content: str = ""
     shelf_level: Optional[int] = None
+    post_number: Optional[str] = None  # Номер поста
+    material: Optional[str] = None  # Материал внутри коробки
     
     @property
     def volume(self) -> float:
@@ -48,6 +50,57 @@ class Container:
     def base_area(self) -> float:
         """Площадь основания в см²"""
         return self.length * self.width
+
+
+@dataclass
+class Post:
+    """Класс для представления поста (заказа)"""
+    post_number: str
+    containers: List[Container] = field(default_factory=list)
+    required_stacks: int = 0
+    optimal_shelf_height: float = 0.0
+    
+    def calculate_requirements(self, base_length: float, base_width: float):
+        """Рассчитать требования к стеллажам для поста"""
+        if not self.containers:
+            return
+        
+        # Определяем максимальную высоту коробок + запас 15-20см
+        max_container_height = max(c.height for c in self.containers)
+        self.optimal_shelf_height = max_container_height + 17.5  # средний запас 17.5см
+        
+        # Группируем коробки по материалам
+        materials = {}
+        for container in self.containers:
+            material = container.material or "unknown"
+            if material not in materials:
+                materials[material] = []
+            materials[material].append(container)
+        
+        # Рассчитываем необходимое количество стеллажей
+        # Учитываем, что коробки с одним материалом должны стоять рядом
+        total_length_needed = 0
+        
+        for material, containers_list in materials.items():
+            # Сортируем по весу (тяжелые вниз)
+            containers_list.sort(key=lambda x: x.weight, reverse=True)
+            
+            # Рассчитываем длину для этого материала
+            material_length = 0
+            current_row_length = 0
+            
+            for container in containers_list:
+                if current_row_length + container.length + 6 > base_length:  # 6см = отступы
+                    material_length = max(material_length, current_row_length)
+                    current_row_length = container.length
+                else:
+                    current_row_length += container.length + 3
+            
+            material_length = max(material_length, current_row_length)
+            total_length_needed += material_length + 10  # 10см между группами материалов
+        
+        # Количество стеллажей = ceil(total_length / base_length)
+        self.required_stacks = max(1, int((total_length_needed + base_length - 1) // base_length))
     
     def __repr__(self):
         status = "Пустая" if self.is_empty else f"С деталями"
@@ -1001,6 +1054,171 @@ def export_warehouse_to_excel(warehouse: Warehouse, containers: List[Container])
     return output.getvalue()
 
 
+def load_posts_from_excel(uploaded_file) -> List[Post]:
+    """
+    Загрузить посты из Excel файла
+    Ожидаемый формат:
+    - Колонки: Пост, Название, Материал, Вес(кг), Длина(см), Ширина(см), Высота(см)
+    """
+    try:
+        df = pd.read_excel(uploaded_file)
+        
+        # Проверка обязательных колонок
+        required_cols = ['Пост', 'Название', 'Материал', 'Вес', 'Длина', 'Ширина', 'Высота']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        
+        if missing_cols:
+            st.error(f"Отсутствуют обязательные колонки: {', '.join(missing_cols)}")
+            return []
+        
+        # Группируем по постам
+        posts_dict = {}
+        container_counter = 1
+        
+        for _, row in df.iterrows():
+            post_num = str(row['Пост']).strip()
+            
+            if post_num not in posts_dict:
+                posts_dict[post_num] = Post(post_number=post_num)
+            
+            # Создаем контейнер
+            container = Container(
+                id=f"P{post_num}_C{container_counter:03d}",
+                name=str(row['Название']).strip(),
+                weight=float(row['Вес']),
+                length=float(row['Длина']),
+                width=float(row['Ширина']),
+                height=float(row['Высота']),
+                material=str(row['Материал']).strip(),
+                post_number=post_num,
+                content=str(row['Материал']).strip()
+            )
+            
+            posts_dict[post_num].containers.append(container)
+            container_counter += 1
+        
+        return list(posts_dict.values())
+    
+    except Exception as e:
+        st.error(f"Ошибка при загрузке Excel: {str(e)}")
+        return []
+
+
+def create_stacks_for_post(post: Post, base_length: float, base_width: float, 
+                           num_shelves: int, shelf_max_weight: float) -> List[StorageStack]:
+    """
+    Создать стеллажи для конкретного поста с учетом группировки по материалам
+    """
+    post.calculate_requirements(base_length, base_width)
+    
+    stacks = []
+    
+    # Создаем необходимое количество стеллажей
+    for i in range(post.required_stacks):
+        stack = StorageStack(
+            name=f"Пост_{post.post_number}_Стеллаж_{i+1}",
+            base_length=base_length,
+            base_width=base_width
+        )
+        
+        # Добавляем полки с оптимальной высотой
+        for shelf_idx in range(num_shelves):
+            is_top = shelf_idx == num_shelves - 1
+            stack.add_shelf(
+                max_weight=shelf_max_weight,
+                height=post.optimal_shelf_height,
+                reserved_for_empty=is_top
+            )
+        
+        stacks.append(stack)
+    
+    return stacks
+
+
+def distribute_post_containers_by_material(post: Post, stacks: List[StorageStack]) -> Dict:
+    """
+    Распределить коробки поста по стеллажам с группировкой по материалам
+    """
+    # Группируем по материалам
+    materials = {}
+    for container in post.containers:
+        material = container.material or "unknown"
+        if material not in materials:
+            materials[material] = []
+        materials[material].append(container)
+    
+    # Сортируем материалы по общему весу (тяжелые материалы первыми)
+    sorted_materials = sorted(
+        materials.items(),
+        key=lambda x: sum(c.weight for c in x[1]),
+        reverse=True
+    )
+    
+    placement_stats = {
+        'total_containers': len(post.containers),
+        'placed': 0,
+        'not_placed': 0,
+        'by_material': {},
+        'by_stack': {},
+        'placement_log': []
+    }
+    
+    current_stack_idx = 0
+    
+    for material, containers_list in sorted_materials:
+        # Сортируем контейнеры материала по весу (тяжелые вниз)
+        containers_list.sort(key=lambda x: x.weight, reverse=True)
+        
+        material_stats = {'placed': 0, 'not_placed': 0}
+        
+        for container in containers_list:
+            placed = False
+            
+            # Пытаемся разместить на текущем и следующих стеллажах
+            for stack_offset in range(len(stacks)):
+                stack_idx = (current_stack_idx + stack_offset) % len(stacks)
+                stack = stacks[stack_idx]
+                
+                # Размещаем на доступных полках (не зарезервированных)
+                available_shelves = [s for s in stack.shelves if not s.reserved_for_empty]
+                
+                for shelf in sorted(available_shelves, key=lambda s: s.level):
+                    if shelf.can_add_container(container):
+                        shelf.add_container(container)
+                        placed = True
+                        placement_stats['placed'] += 1
+                        material_stats['placed'] += 1
+                        
+                        if stack.name not in placement_stats['by_stack']:
+                            placement_stats['by_stack'][stack.name] = 0
+                        placement_stats['by_stack'][stack.name] += 1
+                        
+                        placement_stats['placement_log'].append({
+                            'container': container.name,
+                            'material': material,
+                            'stack': stack.name,
+                            'shelf': shelf.level,
+                            'weight': container.weight
+                        })
+                        break
+                
+                if placed:
+                    break
+            
+            if not placed:
+                placement_stats['not_placed'] += 1
+                material_stats['not_placed'] += 1
+        
+        placement_stats['by_material'][material] = material_stats
+        
+        # Переходим к следующему стеллажу для следующего материала
+        # (чтобы материалы не смешивались)
+        if material_stats['placed'] > 0:
+            current_stack_idx = (current_stack_idx + 1) % len(stacks)
+    
+    return placement_stats
+
+
 def save_state_to_file():
     """Сохранить состояние в JSON файл"""
     if st.session_state.stack is None:
@@ -1328,7 +1546,7 @@ def main():
     warehouse = st.session_state.warehouse
     
     # Вкладки
-    tab1, tab2, tab3, tab4 = st.tabs(["📦 Управление Тарами", "📊 Визуализация", "📈 Статистика", "🔄 Распределение"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📦 Управление Тарами", "📊 Визуализация", "📈 Статистика", "🔄 Распределение", "🏭 Работа с Постами"])
     
     with tab1:
         st.header("Добавление Тар")
@@ -1666,6 +1884,236 @@ def main():
             st.dataframe(df_unplaced, use_container_width=True)
             
             st.info("💡 Рекомендации: Добавьте больше стеллажей или уменьшите размер/вес тар")
+    
+    # Вкладка "Работа с Постами"
+    with tab5:
+        st.header("🏭 Работа с Постами")
+        st.markdown("""
+        Загрузите Excel файл с постами для автоматического расчета и расстановки тар по стеллажам.
+        
+        **Требования к Excel файлу:**
+        - Обязательные столбцы: `Пост`, `Название`, `Материал`, `Вес(кг)`, `Длина(см)`, `Ширина(см)`, `Высота(см)`
+        - Каждая строка - одна тара
+        - Группировка тар по постам происходит автоматически
+        
+        **Правила размещения:**
+        - ✅ Автоматический расчет оптимальной высоты стеллажа (макс. высота тары + 15-20 см)
+        - ✅ Автоматический расчет необходимого количества стеллажей для каждого поста
+        - ✅ Тары с одинаковым материалом размещаются рядом друг с другом (в длину)
+        - ✅ Соблюдение всех стандартных правил (тяжелые снизу, приоритетные доступны, пустые сверху)
+        """)
+        
+        st.markdown("---")
+        
+        # Загрузка Excel файла
+        uploaded_excel = st.file_uploader(
+            "📂 Загрузите Excel файл с постами",
+            type=['xlsx', 'xls'],
+            help="Файл должен содержать столбцы: Пост, Название, Материал, Вес(кг), Длина(см), Ширина(см), Высота(см)",
+            key="upload_posts_excel"
+        )
+        
+        if uploaded_excel is not None:
+            try:
+                # Загружаем посты из Excel
+                posts = load_posts_from_excel(uploaded_excel)
+                
+                if posts:
+                    st.success(f"✅ Загружено {len(posts)} постов")
+                    
+                    # Выбор поста для обработки
+                    st.markdown("---")
+                    st.subheader("📋 Выберите пост для создания стеллажей")
+                    
+                    # Создаем таблицу с информацией о постах
+                    posts_info = []
+                    for post in posts:
+                        # Расчитываем требования для поста
+                        post.calculate_requirements(
+                            base_length=st.session_state.warehouse.stacks[0].base_length if st.session_state.warehouse else 200,
+                            base_width=st.session_state.warehouse.stacks[0].base_width if st.session_state.warehouse else 120
+                        )
+                        
+                        posts_info.append({
+                            'Пост': post.post_number,
+                            'Тар': len(post.containers),
+                            'Материалов': len(set(c.material for c in post.containers if c.material)),
+                            'Требуется стеллажей': post.required_stacks,
+                            'Оптимальная высота полки (см)': f"{post.optimal_shelf_height:.1f}",
+                            'Общий вес (кг)': f"{sum(c.weight for c in post.containers):.1f}"
+                        })
+                    
+                    df_posts = pd.DataFrame(posts_info)
+                    st.dataframe(df_posts, use_container_width=True, hide_index=True)
+                    
+                    # Выбор поста
+                    selected_post_number = st.selectbox(
+                        "Выберите пост",
+                        options=[p.post_number for p in posts],
+                        key="selected_post"
+                    )
+                    
+                    selected_post = next(p for p in posts if p.post_number == selected_post_number)
+                    
+                    # Информация о выбранном посте
+                    st.markdown("---")
+                    st.subheader(f"📦 Пост: {selected_post.post_number}")
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Тар", len(selected_post.containers))
+                    with col2:
+                        st.metric("Материалов", len(set(c.material for c in selected_post.containers if c.material)))
+                    with col3:
+                        st.metric("Требуется стеллажей", selected_post.required_stacks)
+                    with col4:
+                        st.metric("Высота полки (см)", f"{selected_post.optimal_shelf_height:.1f}")
+                    
+                    # Показываем распределение материалов
+                    st.markdown("**📊 Распределение материалов:**")
+                    material_stats = {}
+                    for container in selected_post.containers:
+                        mat = container.material if container.material else "Не указан"
+                        if mat not in material_stats:
+                            material_stats[mat] = {'count': 0, 'weight': 0}
+                        material_stats[mat]['count'] += 1
+                        material_stats[mat]['weight'] += container.weight
+                    
+                    material_data = []
+                    for mat, stats in sorted(material_stats.items(), key=lambda x: x[1]['weight'], reverse=True):
+                        material_data.append({
+                            'Материал': mat,
+                            'Количество тар': stats['count'],
+                            'Общий вес (кг)': f"{stats['weight']:.1f}"
+                        })
+                    
+                    df_materials = pd.DataFrame(material_data)
+                    st.dataframe(df_materials, use_container_width=True, hide_index=True)
+                    
+                    # Настройки стеллажей для поста
+                    st.markdown("---")
+                    st.subheader("⚙️ Параметры стеллажей")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        post_base_length = st.number_input(
+                            "Длина стеллажа (см)",
+                            min_value=100,
+                            value=200,
+                            step=10,
+                            key="post_base_length"
+                        )
+                    with col2:
+                        post_base_width = st.number_input(
+                            "Ширина стеллажа (см)",
+                            min_value=50,
+                            value=120,
+                            step=10,
+                            key="post_base_width"
+                        )
+                    with col3:
+                        post_num_shelves = st.number_input(
+                            "Количество полок",
+                            min_value=3,
+                            max_value=10,
+                            value=5,
+                            step=1,
+                            key="post_num_shelves"
+                        )
+                    
+                    # Кнопка создания стеллажей
+                    if st.button("🔧 Создать стеллажи для поста", type="primary", use_container_width=True, key="create_post_stacks"):
+                        # Пересчитываем требования с новыми параметрами
+                        selected_post.calculate_requirements(post_base_length, post_base_width)
+                        
+                        # Создаем стеллажи для поста
+                        post_stacks = create_stacks_for_post(
+                            selected_post,
+                            post_base_length,
+                            post_base_width,
+                            post_num_shelves
+                        )
+                        
+                        # Создаем временный склад для поста
+                        post_warehouse = Warehouse(f"Склад для поста {selected_post.post_number}")
+                        for stack in post_stacks:
+                            post_warehouse.add_stack(stack)
+                        
+                        # Распределяем контейнеры по материалам
+                        placement_stats = distribute_post_containers_by_material(
+                            selected_post,
+                            post_stacks
+                        )
+                        
+                        # Сохраняем в session state
+                        st.session_state.warehouse = post_warehouse
+                        st.session_state.containers = selected_post.containers
+                        
+                        st.success(f"✅ Создано {len(post_stacks)} стеллажей для поста {selected_post.post_number}")
+                        
+                        # Показываем статистику размещения
+                        st.markdown("---")
+                        st.subheader("📊 Результаты размещения")
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Размещено тар", placement_stats['placed_containers'])
+                        with col2:
+                            st.metric("Не размещено", placement_stats['unplaced_containers'])
+                        with col3:
+                            placed_pct = (placement_stats['placed_containers'] / placement_stats['total_containers'] * 100) if placement_stats['total_containers'] > 0 else 0
+                            st.metric("Успешность", f"{placed_pct:.1f}%")
+                        
+                        # Детальная таблица размещения
+                        st.markdown("**🗂️ Детальное размещение:**")
+                        
+                        placement_data = []
+                        for container in selected_post.containers:
+                            if hasattr(container, 'placement_info') and container.placement_info:
+                                placement_data.append({
+                                    'Название': container.name,
+                                    'Материал': container.material or 'Не указан',
+                                    'Вес (кг)': f"{container.weight:.1f}",
+                                    'Размеры (см)': f"{container.length}×{container.width}×{container.height}",
+                                    'Стеллаж': container.placement_info['stack'],
+                                    'Полка': container.placement_info['shelf'],
+                                    'Позиция (см)': f"({container.placement_info['x']:.1f}, {container.placement_info['y']:.1f})"
+                                })
+                        
+                        if placement_data:
+                            df_placement = pd.DataFrame(placement_data)
+                            st.dataframe(df_placement, use_container_width=True, hide_index=True)
+                            
+                            # Группировка по материалам
+                            st.markdown("**📦 Группировка по материалам:**")
+                            for material in sorted(set(c.material for c in selected_post.containers if c.material)):
+                                material_containers = [c for c in selected_post.containers if c.material == material and hasattr(c, 'placement_info') and c.placement_info]
+                                if material_containers:
+                                    stacks_used = set(c.placement_info['stack'] for c in material_containers)
+                                    st.write(f"**{material}:** {len(material_containers)} тар на {len(stacks_used)} стеллажах ({', '.join(sorted(stacks_used))})")
+                        else:
+                            st.warning("Ни одна тара не была размещена")
+                        
+                        st.info("💡 Теперь вы можете перейти на вкладку 'Визуализация' или 'Статистика' для просмотра результатов")
+                        
+            except Exception as e:
+                st.error(f"❌ Ошибка при обработке файла: {str(e)}")
+                st.exception(e)
+        else:
+            st.info("👆 Загрузите Excel файл для начала работы с постами")
+            
+            # Пример формата Excel
+            with st.expander("📄 Пример формата Excel файла"):
+                st.markdown("""
+                | Пост | Название | Материал | Вес(кг) | Длина(см) | Ширина(см) | Высота(см) |
+                |------|----------|----------|---------|-----------|------------|------------|
+                | П-001 | Тара 1 | Сталь | 150 | 80 | 60 | 40 |
+                | П-001 | Тара 2 | Сталь | 120 | 75 | 55 | 35 |
+                | П-001 | Тара 3 | Алюминий | 80 | 70 | 50 | 30 |
+                | П-002 | Тара 4 | Медь | 200 | 90 | 65 | 45 |
+                | П-002 | Тара 5 | Медь | 180 | 85 | 60 | 40 |
+                """)
+                st.caption("Убедитесь, что названия столбцов точно совпадают с указанными выше")
 
 
 if __name__ == "__main__":
