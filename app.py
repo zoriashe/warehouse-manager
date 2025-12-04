@@ -1191,84 +1191,194 @@ def create_stacks_for_post(post: Post, base_length: float, base_width: float,
 
 def distribute_post_containers_by_material(post: Post, stacks: List[StorageStack]) -> Dict:
     """
-    Распределить коробки поста по стеллажам с группировкой по материалам
+    Распределить коробки поста по стеллажам с строгой группировкой:
+    1. Сначала группируем по модели/артикулу
+    2. Внутри модели группируем по материалу
+    3. Ящики одной модели с одним материалом стоят строго друг за другом
     """
-    # Группируем по материалам
-    materials = {}
+    # Создаем составной ключ: артикул (из id) + материал
+    # Извлекаем артикул из ID контейнера (формат: "АРТИКУЛ_NNN")
+    groups = {}
     for container in post.containers:
+        # Получаем артикул из ID (до первого underscore)
+        article = container.id.split('_')[0] if '_' in container.id else container.id
         material = container.material or "unknown"
-        if material not in materials:
-            materials[material] = []
-        materials[material].append(container)
+        
+        # Составной ключ: артикул + материал
+        group_key = f"{article}|{material}"
+        
+        if group_key not in groups:
+            groups[group_key] = {
+                'article': article,
+                'material': material,
+                'containers': []
+            }
+        groups[group_key].append(container)
     
-    # Сортируем материалы по общему весу (тяжелые материалы первыми)
-    sorted_materials = sorted(
-        materials.items(),
-        key=lambda x: sum(c.weight for c in x[1]),
-        reverse=True
+    # Сортируем группы:
+    # 1. По артикулу (алфавитный порядок)
+    # 2. По общему весу группы (тяжелые первыми)
+    sorted_groups = sorted(
+        groups.items(),
+        key=lambda x: (x[1]['article'], -sum(c.weight for c in x[1]['containers']))
     )
     
     placement_stats = {
         'total_containers': len(post.containers),
-        'placed': 0,
-        'not_placed': 0,
+        'placed_containers': 0,
+        'unplaced_containers': 0,
         'by_material': {},
         'by_stack': {},
+        'by_article': {},
         'placement_log': []
     }
     
     current_stack_idx = 0
+    current_shelf_in_stack = {}  # Отслеживаем текущую полку на каждом стеллаже
     
-    for material, containers_list in sorted_materials:
-        # Сортируем контейнеры материала по весу (тяжелые вниз)
+    for stack in stacks:
+        current_shelf_in_stack[stack.name] = 0
+    
+    for group_key, group_data in sorted_groups:
+        article = group_data['article']
+        material = group_data['material']
+        containers_list = group_data['containers']
+        
+        # Сортируем контейнеры в группе по весу (тяжелые вниз)
         containers_list.sort(key=lambda x: x.weight, reverse=True)
         
-        material_stats = {'placed': 0, 'not_placed': 0}
+        group_stats = {'placed': 0, 'not_placed': 0}
         
+        # Размещаем ВСЕ контейнеры группы последовательно
         for container in containers_list:
             placed = False
             
-            # Пытаемся разместить на текущем и следующих стеллажах
-            for stack_offset in range(len(stacks)):
-                stack_idx = (current_stack_idx + stack_offset) % len(stacks)
-                stack = stacks[stack_idx]
-                
-                # Размещаем на доступных полках (не зарезервированных)
+            # Пытаемся разместить на текущем стеллаже
+            if current_stack_idx < len(stacks):
+                stack = stacks[current_stack_idx]
                 available_shelves = [s for s in stack.shelves if not s.reserved_for_empty]
                 
-                for shelf in sorted(available_shelves, key=lambda s: s.level):
+                # Пытаемся разместить начиная с текущей полки
+                for shelf_idx in range(current_shelf_in_stack[stack.name], len(available_shelves)):
+                    shelf = available_shelves[shelf_idx]
+                    
                     if shelf.can_add_container(container):
                         shelf.add_container(container)
+                        container.placement_info = {
+                            'stack': stack.name,
+                            'shelf': shelf.level,
+                            'x': 0,  # Упрощенно
+                            'y': shelf.level * post.optimal_shelf_height
+                        }
                         placed = True
-                        placement_stats['placed'] += 1
-                        material_stats['placed'] += 1
+                        placement_stats['placed_containers'] += 1
+                        group_stats['placed'] += 1
                         
+                        # Обновляем статистику
                         if stack.name not in placement_stats['by_stack']:
                             placement_stats['by_stack'][stack.name] = 0
                         placement_stats['by_stack'][stack.name] += 1
                         
+                        if article not in placement_stats['by_article']:
+                            placement_stats['by_article'][article] = 0
+                        placement_stats['by_article'][article] += 1
+                        
                         placement_stats['placement_log'].append({
                             'container': container.name,
+                            'article': article,
                             'material': material,
                             'stack': stack.name,
                             'shelf': shelf.level,
                             'weight': container.weight
                         })
+                        
+                        # Обновляем текущую полку для этого стеллажа
+                        current_shelf_in_stack[stack.name] = shelf_idx
                         break
                 
-                if placed:
-                    break
+                # Если не поместилось на текущей полке, переходим к следующей
+                if not placed and current_shelf_in_stack[stack.name] < len(available_shelves) - 1:
+                    current_shelf_in_stack[stack.name] += 1
+                    # Повторяем попытку на следующей полке
+                    shelf = available_shelves[current_shelf_in_stack[stack.name]]
+                    if shelf.can_add_container(container):
+                        shelf.add_container(container)
+                        container.placement_info = {
+                            'stack': stack.name,
+                            'shelf': shelf.level,
+                            'x': 0,
+                            'y': shelf.level * post.optimal_shelf_height
+                        }
+                        placed = True
+                        placement_stats['placed_containers'] += 1
+                        group_stats['placed'] += 1
+                        
+                        if stack.name not in placement_stats['by_stack']:
+                            placement_stats['by_stack'][stack.name] = 0
+                        placement_stats['by_stack'][stack.name] += 1
+                        
+                        if article not in placement_stats['by_article']:
+                            placement_stats['by_article'][article] = 0
+                        placement_stats['by_article'][article] += 1
+                        
+                        placement_stats['placement_log'].append({
+                            'container': container.name,
+                            'article': article,
+                            'material': material,
+                            'stack': stack.name,
+                            'shelf': shelf.level,
+                            'weight': container.weight
+                        })
             
             if not placed:
-                placement_stats['not_placed'] += 1
-                material_stats['not_placed'] += 1
+                # Переходим к следующему стеллажу
+                current_stack_idx += 1
+                if current_stack_idx < len(stacks):
+                    current_shelf_in_stack[stacks[current_stack_idx].name] = 0
+                    # Повторяем попытку на новом стеллаже
+                    stack = stacks[current_stack_idx]
+                    available_shelves = [s for s in stack.shelves if not s.reserved_for_empty]
+                    if available_shelves:
+                        shelf = available_shelves[0]
+                        if shelf.can_add_container(container):
+                            shelf.add_container(container)
+                            container.placement_info = {
+                                'stack': stack.name,
+                                'shelf': shelf.level,
+                                'x': 0,
+                                'y': shelf.level * post.optimal_shelf_height
+                            }
+                            placed = True
+                            placement_stats['placed_containers'] += 1
+                            group_stats['placed'] += 1
+                            
+                            if stack.name not in placement_stats['by_stack']:
+                                placement_stats['by_stack'][stack.name] = 0
+                            placement_stats['by_stack'][stack.name] += 1
+                            
+                            if article not in placement_stats['by_article']:
+                                placement_stats['by_article'][article] = 0
+                            placement_stats['by_article'][article] += 1
+                            
+                            placement_stats['placement_log'].append({
+                                'container': container.name,
+                                'article': article,
+                                'material': material,
+                                'stack': stack.name,
+                                'shelf': shelf.level,
+                                'weight': container.weight
+                            })
+            
+            if not placed:
+                placement_stats['unplaced_containers'] += 1
+                group_stats['not_placed'] += 1
         
-        placement_stats['by_material'][material] = material_stats
+        # Статистика по материалам
+        material_key = f"{article}_{material}"
+        placement_stats['by_material'][material_key] = group_stats
         
-        # Переходим к следующему стеллажу для следующего материала
-        # (чтобы материалы не смешивались)
-        if material_stats['placed'] > 0:
-            current_stack_idx = (current_stack_idx + 1) % len(stacks)
+        # После размещения группы НЕ переходим к следующему стеллажу
+        # Продолжаем заполнять текущий стеллаж следующей группой
     
     return placement_stats
 
@@ -2056,7 +2166,11 @@ def main():
                         placement_data = []
                         for container in selected_post.containers:
                             if hasattr(container, 'placement_info') and container.placement_info:
+                                # Извлекаем артикул из ID
+                                article = container.id.split('_')[0] if '_' in container.id else container.id
+                                
                                 placement_data.append({
+                                    'Артикул': article,
                                     'Название': container.name,
                                     'Материал': container.material or 'Не указан',
                                     'Вес (кг)': f"{container.weight:.1f}",
@@ -2070,13 +2184,33 @@ def main():
                             df_placement = pd.DataFrame(placement_data)
                             st.dataframe(df_placement, use_container_width=True, hide_index=True)
                             
-                            # Группировка по материалам
-                            st.markdown("**📦 Группировка по материалам:**")
-                            for material in sorted(set(c.material for c in selected_post.containers if c.material)):
-                                material_containers = [c for c in selected_post.containers if c.material == material and hasattr(c, 'placement_info') and c.placement_info]
-                                if material_containers:
-                                    stacks_used = set(c.placement_info['stack'] for c in material_containers)
-                                    st.write(f"**{material}:** {len(material_containers)} тар на {len(stacks_used)} стеллажах ({', '.join(sorted(stacks_used))})")
+                            # Группировка по артикулам и материалам
+                            st.markdown("**📦 Группировка по артикулам и материалам:**")
+                            
+                            # Собираем данные по артикулам
+                            article_groups = {}
+                            for c in selected_post.containers:
+                                if hasattr(c, 'placement_info') and c.placement_info:
+                                    # Извлекаем артикул из ID
+                                    article = c.id.split('_')[0] if '_' in c.id else c.id
+                                    material = c.material or "unknown"
+                                    key = f"{article}|{material}"
+                                    
+                                    if key not in article_groups:
+                                        article_groups[key] = {
+                                            'article': article,
+                                            'material': material,
+                                            'containers': [],
+                                            'stacks': set()
+                                        }
+                                    article_groups[key]['containers'].append(c)
+                                    article_groups[key]['stacks'].add(c.placement_info['stack'])
+                            
+                            # Показываем группировку
+                            for key in sorted(article_groups.keys()):
+                                group = article_groups[key]
+                                stacks_list = ', '.join(sorted(group['stacks']))
+                                st.write(f"**{group['article']}** ({group['material']}): {len(group['containers'])} шт. → Стеллажи: {stacks_list}")
                         else:
                             st.warning("Ни одна тара не была размещена")
                         
