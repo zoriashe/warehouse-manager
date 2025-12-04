@@ -1426,76 +1426,16 @@ def main():
     
     # Боковая панель для настроек
     with st.sidebar:
-        st.header("⚙️ Настройки Склада")
+        st.header("⚙️ Настройки Стеллажа")
         
-        warehouse_name = st.text_input("Название склада", "Склад №1")
-        
-        # Количество стеллажей
-        st.subheader("🏭 Стеллажи")
-        num_stacks = st.number_input(
-            "Количество стеллажей", 
-            min_value=1, 
-            max_value=20, 
-            value=st.session_state.num_stacks, 
-            step=1,
-            help="Тары будут автоматически распределены по всем стеллажам"
-        )
-        st.session_state.num_stacks = num_stacks
-        
-        # Шаблон конфигурации стеллажа
-        st.subheader("📐 Шаблон Стеллажа")
-        st.caption("Все стеллажи будут созданы с одинаковыми параметрами")
+        # Параметры стеллажа
+        st.subheader("📐 Размеры Стеллажа")
         
         col1, col2 = st.columns(2)
         with col1:
             base_length = st.number_input("Длина (см)", min_value=50, value=200, step=10)
         with col2:
             base_width = st.number_input("Ширина (см)", min_value=50, value=120, step=10)
-        
-        st.subheader("🗄️ Полки")
-        num_shelves = st.number_input("Количество полок", min_value=2, max_value=10, value=5, step=1)
-        
-        shelves_config = []
-        for i in range(num_shelves):
-            with st.expander(f"Полка {i} {'(БУФЕР для пустых)' if i == num_shelves - 1 else ''}", expanded=False):
-                col1, col2 = st.columns(2)
-                with col1:
-                    height = st.number_input(f"Высота (см)", min_value=20, value=50, step=5, key=f"h_{i}")
-                with col2:
-                    max_weight = st.number_input(f"Макс. нагрузка (кг)", min_value=50, value=max(100, 500 - i * 80), step=50, key=f"w_{i}")
-                
-                shelves_config.append({
-                    'height': height,
-                    'max_weight': max_weight,
-                    'reserved': i == num_shelves - 1
-                })
-        
-        st.markdown("---")
-        if st.button("🔧 Создать Склад", type="primary", use_container_width=True):
-            # Проверка минимального количества полок для приоритетных тар
-            if num_shelves < 4:
-                st.warning("⚠️ Рекомендуется минимум 4 полки для корректного размещения приоритетных тар")
-            
-            # Создаем склад
-            warehouse = Warehouse(warehouse_name)
-            
-            # Создаем несколько стеллажей
-            for stack_idx in range(num_stacks):
-                stack_name = f"Стеллаж-{stack_idx + 1}"
-                stack = StorageStack(stack_name, base_length, base_width)
-                
-                for config in shelves_config:
-                    stack.add_shelf(
-                        max_weight=config['max_weight'],
-                        height=config['height'],
-                        reserved_for_empty=config['reserved']
-                    )
-                
-                warehouse.add_stack(stack)
-            
-            st.session_state.warehouse = warehouse
-            st.success(f"✅ Склад создан с {num_stacks} стеллажами!")
-            st.info(f"💡 Всего полок: {num_stacks * num_shelves}")
         
         # Раздел сохранения/загрузки
         st.markdown("---")
@@ -1538,11 +1478,7 @@ def main():
                     key="download_excel"
                 )
     
-    # Основная область
-    if st.session_state.warehouse is None:
-        st.info("👈 Настройте параметры склада в боковой панели и нажмите 'Создать Склад'")
-        return
-    
+    # Основная область - больше не требуется создание склада
     warehouse = st.session_state.warehouse
     
     # Вкладки
@@ -1928,11 +1864,8 @@ def main():
                     # Создаем таблицу с информацией о постах
                     posts_info = []
                     for post in posts:
-                        # Расчитываем требования для поста
-                        post.calculate_requirements(
-                            base_length=st.session_state.warehouse.stacks[0].base_length if st.session_state.warehouse else 200,
-                            base_width=st.session_state.warehouse.stacks[0].base_width if st.session_state.warehouse else 120
-                        )
+                        # Расчитываем требования для поста используя настройки из боковой панели
+                        post.calculate_requirements(base_length, base_width)
                         
                         posts_info.append({
                             'Пост': post.post_number,
@@ -1990,47 +1923,29 @@ def main():
                     df_materials = pd.DataFrame(material_data)
                     st.dataframe(df_materials, use_container_width=True, hide_index=True)
                     
-                    # Настройки стеллажей для поста
+                    # Параметры полок
                     st.markdown("---")
-                    st.subheader("⚙️ Параметры стеллажей")
+                    st.subheader("⚙️ Параметры полок")
                     
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        post_base_length = st.number_input(
-                            "Длина стеллажа (см)",
-                            min_value=100,
-                            value=200,
-                            step=10,
-                            key="post_base_length"
-                        )
-                    with col2:
-                        post_base_width = st.number_input(
-                            "Ширина стеллажа (см)",
-                            min_value=50,
-                            value=120,
-                            step=10,
-                            key="post_base_width"
-                        )
-                    with col3:
-                        post_num_shelves = st.number_input(
-                            "Количество полок",
-                            min_value=3,
-                            max_value=10,
-                            value=5,
-                            step=1,
-                            key="post_num_shelves"
-                        )
+                    post_num_shelves = st.number_input(
+                        "Количество полок",
+                        min_value=3,
+                        max_value=10,
+                        value=5,
+                        step=1,
+                        key="post_num_shelves"
+                    )
                     
                     # Кнопка создания стеллажей
                     if st.button("🔧 Создать стеллажи для поста", type="primary", use_container_width=True, key="create_post_stacks"):
-                        # Пересчитываем требования с новыми параметрами
-                        selected_post.calculate_requirements(post_base_length, post_base_width)
+                        # Пересчитываем требования с параметрами из боковой панели
+                        selected_post.calculate_requirements(base_length, base_width)
                         
                         # Создаем стеллажи для поста
                         post_stacks = create_stacks_for_post(
                             selected_post,
-                            post_base_length,
-                            post_base_width,
+                            base_length,
+                            base_width,
                             post_num_shelves
                         )
                         
