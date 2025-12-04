@@ -1485,341 +1485,353 @@ def main():
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📦 Управление Тарами", "📊 Визуализация", "📈 Статистика", "🔄 Распределение", "🏭 Работа с Постами"])
     
     with tab1:
-        st.header("Добавление Тар")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            container_name = st.text_input("Название тары", f"Тара {st.session_state.container_counter}")
-            weight = st.number_input("Вес (кг)", min_value=0.1, value=50.0, step=5.0)
-        
-        with col2:
-            length = st.number_input("Длина (см)", min_value=10, value=50, step=5)
-            width = st.number_input("Ширина (см)", min_value=10, value=40, step=5)
-        
-        with col3:
-            height = st.number_input("Высота (см)", min_value=10, value=40, step=5)
-            is_empty = st.checkbox("Пустая тара")
-        
-        if not is_empty:
-            col1, col2 = st.columns(2)
-            with col1:
-                priority = st.checkbox("Приоритетные детали (требует доступа)")
-            with col2:
-                content = st.text_input("Содержимое", "Детали")
+        if warehouse is None:
+            st.info("👈 Сначала загрузите Excel файл с постами на вкладке 'Работа с Постами' или загрузите сохраненную конфигурацию")
         else:
-            priority = False
-            content = ""
-        
-        if st.button("➕ Добавить тару", type="primary"):
-            container = Container(
-                id=f"T{st.session_state.container_counter:03d}",
-                name=container_name,
-                weight=weight,
-                length=length,
-                width=width,
-                height=height,
-                is_empty=is_empty,
-                priority_parts=priority,
-                content=content
-            )
-            st.session_state.containers.append(container)
-            st.session_state.container_counter += 1
-            st.success(f"✅ Тара '{container_name}' добавлена!")
-            st.rerun()
-        
-        st.markdown("---")
-        st.subheader("Список Тар")
-        
-        if st.session_state.containers:
-            # Создаем DataFrame для отображения
-            containers_data = []
-            for c in st.session_state.containers:
-                # Находим стеллаж, на котором размещена тара
-                stack_name = 'Не размещена'
-                for stack in warehouse.stacks:
-                    for shelf in stack.shelves:
-                        if c in shelf.containers:
-                            stack_name = stack.name
-                            break
-                    if stack_name != 'Не размещена':
-                        break
-                
-                containers_data.append({
-                    'ID': c.id,
-                    'Название': c.name,
-                    'Стеллаж': stack_name,
-                    'Полка': f"Полка {c.shelf_level}" if c.shelf_level is not None else "-",
-                    'Размеры (ДxШxВ)': f"{c.length}x{c.width}x{c.height}",
-                    'Вес (кг)': c.weight,
-                    'Тип': 'Пустая' if c.is_empty else ('Приоритет' if c.priority_parts else 'Обычная'),
-                    'Содержимое': c.content if c.content else '-'
-                })
-            
-            df = pd.DataFrame(containers_data)
-            st.dataframe(df, use_container_width=True)
+            st.header("Добавление Тар")
             
             col1, col2, col3 = st.columns(3)
+            
             with col1:
-                if st.button("🎯 Распределить по складу", type="primary"):
-                    # Очищаем старые размещения
-                    for stack in warehouse.stacks:
-                        for shelf in stack.shelves:
-                            shelf.containers.clear()
-                    
-                    # Распределяем контейнеры по всем стеллажам
-                    placement_stats = warehouse.distribute_containers(st.session_state.containers)
-                    
-                    st.success(f"✅ Размещено: {placement_stats['placed']} тар")
-                    if placement_stats['not_placed'] > 0:
-                        st.warning(f"⚠️ Не размещено: {placement_stats['not_placed']} тар")
-                        st.info("💡 Попробуйте добавить еще стеллажей или уменьшить количество тар")
-                    
-                    # Показываем распределение по стеллажам
-                    st.markdown("**Распределение по стеллажам:**")
-                    for stack_name, count in placement_stats['by_stack'].items():
-                        st.write(f"- {stack_name}: {count} тар")
-                    
-                    st.rerun()
+                container_name = st.text_input("Название тары", f"Тара {st.session_state.container_counter}")
+                weight = st.number_input("Вес (кг)", min_value=0.1, value=50.0, step=5.0)
             
             with col2:
-                if st.button("🗑️ Очистить все", type="secondary"):
-                    st.session_state.containers.clear()
-                    for stack in warehouse.stacks:
-                        for shelf in stack.shelves:
-                            shelf.containers.clear()
-                    st.rerun()
+                length = st.number_input("Длина (см)", min_value=10, value=50, step=5)
+                width = st.number_input("Ширина (см)", min_value=10, value=40, step=5)
             
             with col3:
-                if st.button("📋 Загрузить пример", type="secondary"):
-                    example_containers = [
-                        Container("T001", "Тяжелая тара №1", 80, 60, 40, 45, content="Металл"),
-                        Container("T002", "Тяжелая тара №2", 75, 60, 40, 45, content="Детали"),
-                        Container("T003", "Средняя тара", 50, 50, 40, 40, content="Запчасти"),
-                        Container("T004", "Срочная", 30, 40, 30, 35, priority_parts=True, content="Заказ А"),
-                        Container("T005", "Срочная №2", 25, 40, 30, 35, priority_parts=True, content="Заказ Б"),
-                        Container("T006", "Пустая №1", 5, 40, 30, 30, is_empty=True),
-                        Container("T007", "Пустая №2", 6, 40, 30, 30, is_empty=True),
-                    ]
-                    st.session_state.containers = example_containers
-                    st.session_state.container_counter = 8
-                    st.rerun()
-        else:
-            st.info("Список тар пуст. Добавьте тары выше.")
+                height = st.number_input("Высота (см)", min_value=10, value=40, step=5)
+                is_empty = st.checkbox("Пустая тара")
+            
+            if not is_empty:
+                col1, col2 = st.columns(2)
+                with col1:
+                    priority = st.checkbox("Приоритетные детали (требует доступа)")
+                with col2:
+                    content = st.text_input("Содержимое", "Детали")
+            else:
+                priority = False
+                content = ""
+            
+            if st.button("➕ Добавить тару", type="primary"):
+                container = Container(
+                    id=f"T{st.session_state.container_counter:03d}",
+                    name=container_name,
+                    weight=weight,
+                    length=length,
+                    width=width,
+                    height=height,
+                    is_empty=is_empty,
+                    priority_parts=priority,
+                    content=content
+                )
+                st.session_state.containers.append(container)
+                st.session_state.container_counter += 1
+                st.success(f"✅ Тара '{container_name}' добавлена!")
+                st.rerun()
+            
+            st.markdown("---")
+            st.subheader("Список Тар")
+            
+            if st.session_state.containers:
+                # Создаем DataFrame для отображения
+                containers_data = []
+                for c in st.session_state.containers:
+                    # Находим стеллаж, на котором размещена тара
+                    stack_name = 'Не размещена'
+                    for stack in warehouse.stacks:
+                        for shelf in stack.shelves:
+                            if c in shelf.containers:
+                                stack_name = stack.name
+                                break
+                        if stack_name != 'Не размещена':
+                            break
+                    
+                    containers_data.append({
+                        'ID': c.id,
+                        'Название': c.name,
+                        'Стеллаж': stack_name,
+                        'Полка': f"Полка {c.shelf_level}" if c.shelf_level is not None else "-",
+                        'Размеры (ДxШxВ)': f"{c.length}x{c.width}x{c.height}",
+                        'Вес (кг)': c.weight,
+                        'Тип': 'Пустая' if c.is_empty else ('Приоритет' if c.priority_parts else 'Обычная'),
+                        'Содержимое': c.content if c.content else '-'
+                    })
+                
+                df = pd.DataFrame(containers_data)
+                st.dataframe(df, use_container_width=True)
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    if st.button("🎯 Распределить по складу", type="primary"):
+                        # Очищаем старые размещения
+                        for stack in warehouse.stacks:
+                            for shelf in stack.shelves:
+                                shelf.containers.clear()
+                        
+                        # Распределяем контейнеры по всем стеллажам
+                        placement_stats = warehouse.distribute_containers(st.session_state.containers)
+                        
+                        st.success(f"✅ Размещено: {placement_stats['placed']} тар")
+                        if placement_stats['not_placed'] > 0:
+                            st.warning(f"⚠️ Не размещено: {placement_stats['not_placed']} тар")
+                            st.info("💡 Попробуйте добавить еще стеллажей или уменьшить количество тар")
+                        
+                        # Показываем распределение по стеллажам
+                        st.markdown("**Распределение по стеллажам:**")
+                        for stack_name, count in placement_stats['by_stack'].items():
+                            st.write(f"- {stack_name}: {count} тар")
+                        
+                        st.rerun()
+                
+                with col2:
+                    if st.button("🗑️ Очистить все", type="secondary"):
+                        st.session_state.containers.clear()
+                        for stack in warehouse.stacks:
+                            for shelf in stack.shelves:
+                                shelf.containers.clear()
+                        st.rerun()
+                
+                with col3:
+                    if st.button("📋 Загрузить пример", type="secondary"):
+                        example_containers = [
+                            Container("T001", "Тяжелая тара №1", 80, 60, 40, 45, content="Металл"),
+                            Container("T002", "Тяжелая тара №2", 75, 60, 40, 45, content="Детали"),
+                            Container("T003", "Средняя тара", 50, 50, 40, 40, content="Запчасти"),
+                            Container("T004", "Срочная", 30, 40, 30, 35, priority_parts=True, content="Заказ А"),
+                            Container("T005", "Срочная №2", 25, 40, 30, 35, priority_parts=True, content="Заказ Б"),
+                            Container("T006", "Пустая №1", 5, 40, 30, 30, is_empty=True),
+                            Container("T007", "Пустая №2", 6, 40, 30, 30, is_empty=True),
+                        ]
+                        st.session_state.containers = example_containers
+                        st.session_state.container_counter = 8
+                        st.rerun()
+            else:
+                st.info("Список тар пуст. Добавьте тары выше.")
     
     with tab2:
-        st.header("3D Визуализация Стеллажей")
-        
-        # Выбор стеллажа для визуализации
-        stack_names = [s.name for s in warehouse.stacks]
-        selected_stack_name = st.selectbox("Выберите стеллаж для визуализации", stack_names)
-        selected_stack = next(s for s in warehouse.stacks if s.name == selected_stack_name)
-        
-        if any(shelf.containers for shelf in selected_stack.shelves):
-            # Информационная панель
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.markdown("### 🔵 Обычные тары")
-                st.caption("Синий цвет")
-            with col2:
-                st.markdown("### 🟠 Приоритетные")
-                st.caption("Оранжевый цвет")
-            with col3:
-                st.markdown("### ⚪ Пустые (буфер)")
-                st.caption("Серый цвет")
-            with col4:
-                total_tars = sum(len(s.containers) for s in selected_stack.shelves)
-                st.metric("Тар на стеллаже", total_tars)
-            
-            st.markdown("---")
-            
-            # 3D визуализация
-            with st.spinner("Создание 3D модели..."):
-                fig = create_3d_visualization(selected_stack)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            st.info("💡 **Управление:** Вращайте мышью | Zoom: колесико | Наведите на тару для деталей")
-            
-            st.markdown("---")
-            
-            # Диаграмма использования
-            st.subheader("📊 Диаграмма использования полок")
-            fig_util = create_utilization_chart(selected_stack)
-            st.plotly_chart(fig_util, use_container_width=True)
-            
-            st.markdown("---")
-            st.subheader("📐 Параметры стеллажа")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.write(f"**Длина:** {selected_stack.base_length} см")
-                st.write(f"**Ширина:** {selected_stack.base_width} см")
-            with col2:
-                total_height = sum(s.height for s in selected_stack.shelves)
-                st.write(f"**Общая высота:** {total_height} см")
-                st.write(f"**Полок:** {len(selected_stack.shelves)}")
-            with col3:
-                stats = selected_stack.get_statistics()
-                st.write(f"**Площадь основания:** {selected_stack.base_length * selected_stack.base_width / 10000:.2f} м²")
-                st.write(f"**Общий объем:** {selected_stack.base_length * selected_stack.base_width * total_height / 1000000:.2f} м³")
+        if warehouse is None:
+            st.info("👈 Сначала загрузите Excel файл с постами на вкладке 'Работа с Постами' или загрузите сохраненную конфигурацию")
         else:
-            st.info("📦 Сначала разместите тары на вкладке 'Управление Тарами'")
-            st.markdown("""
-            ### Как начать:
-            1. Перейдите на вкладку **"Управление Тарами"**
-            2. Нажмите **"Загрузить пример"** для быстрого теста
-            3. Нажмите **"Распределить по складу"**
-            4. Вернитесь сюда для просмотра 3D модели
-            """)
-    
-    with tab3:
-        st.header("Статистика Склада")
-        
-        # Общая статистика по складу
-        total_stats = warehouse.get_total_statistics()
-        
-        st.subheader("📊 Общая информация")
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric("Стеллажей", total_stats['total_stacks'])
-            st.metric("Полок", total_stats['total_shelves'])
-        
-        with col2:
-            st.metric("Тар размещено", total_stats['total_containers'])
-            st.metric("Не размещено", total_stats['unplaced_containers'])
-        
-        with col3:
-            st.metric("Общая площадь", f"{total_stats['total_area_m2']:.2f} м²")
-            st.metric("Занято", f"{total_stats['occupied_area_m2']:.2f} м²")
-        
-        with col4:
-            st.metric("Использование", f"{total_stats['utilization_percent']:.1f}%")
-            st.metric("Общий вес", f"{total_stats['total_weight_kg']:.1f} кг")
-        
-        st.markdown("---")
-        
-        # Статистика по каждому стеллажу
-        st.subheader("📦 Детали по стеллажам")
-        
-        for stack in warehouse.stacks:
-            stack_stats = stack.get_statistics()
+            st.header("3D Визуализация Стеллажей")
             
-            with st.expander(f"**{stack.name}** - Использование: {stack_stats['utilization_percent']:.1f}%", expanded=False):
+            # Выбор стеллажа для визуализации
+            stack_names = [s.name for s in warehouse.stacks]
+            selected_stack_name = st.selectbox("Выберите стеллаж для визуализации", stack_names)
+            selected_stack = next(s for s in warehouse.stacks if s.name == selected_stack_name)
+            
+            if any(shelf.containers for shelf in selected_stack.shelves):
+                # Информационная панель
                 col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
-                    st.write(f"**Полок:** {stack_stats['total_shelves']}")
-                    st.write(f"**Тар:** {stack_stats['total_containers']}")
-                
+                    st.markdown("### 🔵 Обычные тары")
+                    st.caption("Синий цвет")
                 with col2:
-                    st.write(f"**Площадь:** {stack_stats['total_area_m2']:.2f} м²")
-                    st.write(f"**Занято:** {stack_stats['occupied_area_m2']:.2f} м²")
-                
+                    st.markdown("### 🟠 Приоритетные")
+                    st.caption("Оранжевый цвет")
                 with col3:
-                    st.write(f"**Свободно:** {stack_stats['free_area_m2']:.2f} м²")
-                    st.write(f"**Использование:** {stack_stats['utilization_percent']:.1f}%")
-                
+                    st.markdown("### ⚪ Пустые (буфер)")
+                    st.caption("Серый цвет")
                 with col4:
-                    st.write(f"**Вес:** {stack_stats['total_weight_kg']:.1f} кг")
-                    st.write(f"**Буфер:** {stack_stats['empty_buffer_count']}")
+                    total_tars = sum(len(s.containers) for s in selected_stack.shelves)
+                    st.metric("Тар на стеллаже", total_tars)
                 
-                # Детали по полкам
-                st.markdown("**Полки:**")
-                for shelf in reversed(stack.shelves):
-                    shelf_name = f"Полка {shelf.level}"
-                    if shelf.reserved_for_empty:
-                        shelf_name += " [БУФЕР]"
+                st.markdown("---")
+                
+                # 3D визуализация
+                with st.spinner("Создание 3D модели..."):
+                    fig = create_3d_visualization(selected_stack)
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                st.info("💡 **Управление:** Вращайте мышью | Zoom: колесико | Наведите на тару для деталей")
+                
+                st.markdown("---")
+                
+                # Диаграмма использования
+                st.subheader("📊 Диаграмма использования полок")
+                fig_util = create_utilization_chart(selected_stack)
+                st.plotly_chart(fig_util, use_container_width=True)
+                
+                st.markdown("---")
+                st.subheader("📐 Параметры стеллажа")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.write(f"**Длина:** {selected_stack.base_length} см")
+                    st.write(f"**Ширина:** {selected_stack.base_width} см")
+                with col2:
+                    total_height = sum(s.height for s in selected_stack.shelves)
+                    st.write(f"**Общая высота:** {total_height} см")
+                    st.write(f"**Полок:** {len(selected_stack.shelves)}")
+                with col3:
+                    stats = selected_stack.get_statistics()
+                    st.write(f"**Площадь основания:** {selected_stack.base_length * selected_stack.base_width / 10000:.2f} м²")
+                    st.write(f"**Общий объем:** {selected_stack.base_length * selected_stack.base_width * total_height / 1000000:.2f} м³")
+            else:
+                st.info("📦 Сначала разместите тары на вкладке 'Управление Тарами'")
+                st.markdown("""
+                ### Как начать:
+                1. Перейдите на вкладку **"Управление Тарами"**
+                2. Нажмите **"Загрузить пример"** для быстрого теста
+                3. Нажмите **"Распределить по складу"**
+                4. Вернитесь сюда для просмотра 3D модели
+                """)
+    
+    with tab3:
+        if warehouse is None:
+            st.info("👈 Сначала загрузите Excel файл с постами на вкладке 'Работа с Постами' или загрузите сохраненную конфигурацию")
+        else:
+            st.header("Статистика Склада")
+            
+            # Общая статистика по складу
+            total_stats = warehouse.get_total_statistics()
+            
+            st.subheader("📊 Общая информация")
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Стеллажей", total_stats['total_stacks'])
+                st.metric("Полок", total_stats['total_shelves'])
+            
+            with col2:
+                st.metric("Тар размещено", total_stats['total_containers'])
+                st.metric("Не размещено", total_stats['unplaced_containers'])
+            
+            with col3:
+                st.metric("Общая площадь", f"{total_stats['total_area_m2']:.2f} м²")
+                st.metric("Занято", f"{total_stats['occupied_area_m2']:.2f} м²")
+            
+            with col4:
+                st.metric("Использование", f"{total_stats['utilization_percent']:.1f}%")
+                st.metric("Общий вес", f"{total_stats['total_weight_kg']:.1f} кг")
+            
+            st.markdown("---")
+            
+            # Статистика по каждому стеллажу
+            st.subheader("📦 Детали по стеллажам")
+            
+            for stack in warehouse.stacks:
+                stack_stats = stack.get_statistics()
+                
+                with st.expander(f"**{stack.name}** - Использование: {stack_stats['utilization_percent']:.1f}%", expanded=False):
+                    col1, col2, col3, col4 = st.columns(4)
                     
-                    st.write(f"- {shelf_name}: {len(shelf.containers)} тар, {shelf.utilization_percent:.1f}% использования")
+                    with col1:
+                        st.write(f"**Полок:** {stack_stats['total_shelves']}")
+                        st.write(f"**Тар:** {stack_stats['total_containers']}")
+                    
+                    with col2:
+                        st.write(f"**Площадь:** {stack_stats['total_area_m2']:.2f} м²")
+                        st.write(f"**Занято:** {stack_stats['occupied_area_m2']:.2f} м²")
+                    
+                    with col3:
+                        st.write(f"**Свободно:** {stack_stats['free_area_m2']:.2f} м²")
+                        st.write(f"**Использование:** {stack_stats['utilization_percent']:.1f}%")
+                    
+                    with col4:
+                        st.write(f"**Вес:** {stack_stats['total_weight_kg']:.1f} кг")
+                        st.write(f"**Буфер:** {stack_stats['empty_buffer_count']}")
+                    
+                    # Детали по полкам
+                    st.markdown("**Полки:**")
+                    for shelf in reversed(stack.shelves):
+                        shelf_name = f"Полка {shelf.level}"
+                        if shelf.reserved_for_empty:
+                            shelf_name += " [БУФЕР]"
+                        
+                        st.write(f"- {shelf_name}: {len(shelf.containers)} тар, {shelf.utilization_percent:.1f}% использования")
     
     with tab4:
-        st.header("🔄 Анализ Распределения")
-        
-        st.info("""
-        **Оптимальное распределение:** Система автоматически распределяет тары по всем стеллажам, 
-        максимизируя использование площади и соблюдая все правила размещения.
-        """)
-        
-        # Показываем общую статистику распределения
-        total_stats = warehouse.get_total_statistics()
-        
-        st.subheader("📊 Эффективность распределения")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("Всего тар", len(st.session_state.containers))
-            st.metric("Размещено", total_stats['total_containers'])
-        
-        with col2:
-            st.metric("Не размещено", total_stats['unplaced_containers'])
-            placement_rate = (total_stats['total_containers'] / len(st.session_state.containers) * 100) if st.session_state.containers else 0
-            st.metric("% размещения", f"{placement_rate:.1f}%")
-        
-        with col3:
-            st.metric("Использование площади", f"{total_stats['utilization_percent']:.1f}%")
-            st.metric("Доступных стеллажей", total_stats['total_stacks'])
-        
-        st.markdown("---")
-        
-        # Распределение по стеллажам
-        st.subheader("📦 Загрузка стеллажей")
-        
-        stacks_data = []
-        for stack in warehouse.stacks:
-            stack_stats = stack.get_statistics()
-            stacks_data.append({
-                'Стеллаж': stack.name,
-                'Тар': stack_stats['total_containers'],
-                'Использование %': round(stack_stats['utilization_percent'], 1),
-                'Занято м²': round(stack_stats['occupied_area_m2'], 2),
-                'Свободно м²': round(stack_stats['free_area_m2'], 2),
-                'Вес кг': round(stack_stats['total_weight_kg'], 1)
-            })
-        
-        if stacks_data:
-            df_stacks = pd.DataFrame(stacks_data)
-            st.dataframe(df_stacks, use_container_width=True)
+        if warehouse is None:
+            st.info("👈 Сначала загрузите Excel файл с постами на вкладке 'Работа с Постами' или загрузите сохраненную конфигурацию")
+        else:
+            st.header("🔄 Анализ Распределения")
             
-            # График распределения
-            fig = go.Figure()
+            st.info("""
+            **Оптимальное распределение:** Система автоматически распределяет тары по всем стеллажам, 
+            максимизируя использование площади и соблюдая все правила размещения.
+            """)
             
-            fig.add_trace(go.Bar(
-                x=[d['Стеллаж'] for d in stacks_data],
-                y=[d['Тар'] for d in stacks_data],
-                name='Количество тар',
-                marker_color='#4169E1'
-            ))
+            # Показываем общую статистику распределения
+            total_stats = warehouse.get_total_statistics()
             
-            fig.update_layout(
-                title="Распределение тар по стеллажам",
-                xaxis_title="Стеллаж",
-                yaxis_title="Количество тар",
-                height=400
-            )
+            st.subheader("📊 Эффективность распределения")
             
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Неразмещенные тары
-        if warehouse.unplaced_containers:
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Всего тар", len(st.session_state.containers))
+                st.metric("Размещено", total_stats['total_containers'])
+            
+            with col2:
+                st.metric("Не размещено", total_stats['unplaced_containers'])
+                placement_rate = (total_stats['total_containers'] / len(st.session_state.containers) * 100) if st.session_state.containers else 0
+                st.metric("% размещения", f"{placement_rate:.1f}%")
+            
+            with col3:
+                st.metric("Использование площади", f"{total_stats['utilization_percent']:.1f}%")
+                st.metric("Доступных стеллажей", total_stats['total_stacks'])
+            
             st.markdown("---")
-            st.subheader("⚠️ Неразмещенные тары")
-            st.warning(f"Не удалось разместить {len(warehouse.unplaced_containers)} тар")
             
-            unplaced_data = []
-            for c in warehouse.unplaced_containers:
-                unplaced_data.append({
-                    'Название': c.name,
-                    'Тип': 'Пустая' if c.is_empty else ('Приоритет' if c.priority_parts else 'Обычная'),
-                    'Размеры': f"{c.length}x{c.width}x{c.height}",
-                    'Вес кг': c.weight
+            # Распределение по стеллажам
+            st.subheader("📦 Загрузка стеллажей")
+            
+            stacks_data = []
+            for stack in warehouse.stacks:
+                stack_stats = stack.get_statistics()
+                stacks_data.append({
+                    'Стеллаж': stack.name,
+                    'Тар': stack_stats['total_containers'],
+                    'Использование %': round(stack_stats['utilization_percent'], 1),
+                    'Занято м²': round(stack_stats['occupied_area_m2'], 2),
+                    'Свободно м²': round(stack_stats['free_area_m2'], 2),
+                    'Вес кг': round(stack_stats['total_weight_kg'], 1)
                 })
             
-            df_unplaced = pd.DataFrame(unplaced_data)
-            st.dataframe(df_unplaced, use_container_width=True)
+            if stacks_data:
+                df_stacks = pd.DataFrame(stacks_data)
+                st.dataframe(df_stacks, use_container_width=True)
+                
+                # График распределения
+                fig = go.Figure()
+                
+                fig.add_trace(go.Bar(
+                    x=[d['Стеллаж'] for d in stacks_data],
+                    y=[d['Тар'] for d in stacks_data],
+                    name='Количество тар',
+                    marker_color='#4169E1'
+                ))
+                
+                fig.update_layout(
+                    title="Распределение тар по стеллажам",
+                    xaxis_title="Стеллаж",
+                    yaxis_title="Количество тар",
+                    height=400
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
             
-            st.info("💡 Рекомендации: Добавьте больше стеллажей или уменьшите размер/вес тар")
+            # Неразмещенные тары
+            if warehouse.unplaced_containers:
+                st.markdown("---")
+                st.subheader("⚠️ Неразмещенные тары")
+                st.warning(f"Не удалось разместить {len(warehouse.unplaced_containers)} тар")
+                
+                unplaced_data = []
+                for c in warehouse.unplaced_containers:
+                    unplaced_data.append({
+                        'Название': c.name,
+                        'Тип': 'Пустая' if c.is_empty else ('Приоритет' if c.priority_parts else 'Обычная'),
+                        'Размеры': f"{c.length}x{c.width}x{c.height}",
+                        'Вес кг': c.weight
+                    })
+                
+                df_unplaced = pd.DataFrame(unplaced_data)
+                st.dataframe(df_unplaced, use_container_width=True)
+                
+                st.info("💡 Рекомендации: Добавьте больше стеллажей или уменьшите размер/вес тар")
     
     # Вкладка "Работа с Постами"
     with tab5:
