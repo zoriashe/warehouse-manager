@@ -34,12 +34,14 @@ class Container:
     length: float  # см
     width: float   # см
     height: float  # см
+    quantity: int = 1  # Количество ящиков
     is_empty: bool = False
     priority_parts: bool = False
     content: str = ""
     shelf_level: Optional[int] = None
     post_number: Optional[str] = None  # Номер поста
     material: Optional[str] = None  # Материал внутри коробки
+    is_heavy: bool = False  # Флаг тяжелого груза
     
     @property
     def volume(self) -> float:
@@ -1058,19 +1060,24 @@ def load_posts_from_excel(uploaded_file) -> List[Post]:
     """
     Загрузить посты из Excel файла
     Ожидаемый формат:
-    - Колонки: Model, Артикул, Наименование на русском языке, Пост, L(mm), W(mm), H(mm) и др.
+    - Обязательные колонки: Модель, Артикул, Наименование на английском, Наименование на русском,
+      Количество коробок, Длина, Ширина, Высота, Способ доставки
     """
     try:
         df = pd.read_excel(uploaded_file)
         
         # Проверка обязательных колонок (гибкая проверка)
         required_mapping = {
-            'Пост': ['Пост', 'Post'],
-            'Название': ['Наименование на русском языке', 'Название', 'Name', 'Наименование'],
-            'Артикул': ['Артикул', 'Article', 'Model'],
-            'Длина': ['L(mm)', 'Длина(см)', 'Длина', 'Length'],
-            'Ширина': ['W(mm)', 'Ширина(см)', 'Ширина', 'Width'],
-            'Высота': ['H(mm)', 'Высота(см)', 'Высота', 'Height']
+            'Модель': ['Модель', 'Model'],
+            'Артикул': ['Артикул', 'Article'],
+            'Название_EN': ['Наименование на английском', 'Name EN', 'Name (EN)', 'English Name'],
+            'Название_RU': ['Наименование на русском', 'Наименование', 'Name RU', 'Name (RU)', 'Russian Name'],
+            'Количество': ['Количество коробок', 'Количество', 'Qty', 'Quantity'],
+            'Длина': ['Длина (мм)', 'Длина', 'Length', 'L', 'L(cm)', 'L(mm)', 'Длина (см)'],
+            'Ширина': ['Ширина (мм)', 'Ширина', 'Width', 'W', 'W(cm)', 'W(mm)', 'Ширина (см)'],
+            'Высота': ['Высота (мм)', 'Высота', 'Height', 'H', 'H(cm)', 'H(mm)', 'Высота (см)'],
+            'Тяжелый': ['Тяжелый', 'Heavy', 'Тяжёлый'],
+            'Доставка': ['Способ доставки', 'Доставка', 'Delivery', 'Delivery Method', 'Shipping']
         }
         
         # Найдем соответствия колонок
@@ -1086,18 +1093,18 @@ def load_posts_from_excel(uploaded_file) -> List[Post]:
                 st.error(f"Не найдена колонка для '{key}'. Ожидаются: {', '.join(possible_names)}")
                 return []
         
-        # Группируем по постам
-        posts_dict = {}
+        # Создаем единый пост "Склад" для всех товаров
+        warehouse_post = Post(post_number="Склад")
         container_counter = 1
         
         for _, row in df.iterrows():
-            post_num = str(row[col_mapping['Пост']]).strip()
-            
-            if pd.isna(post_num) or post_num == 'nan' or not post_num:
-                continue
-            
-            if post_num not in posts_dict:
-                posts_dict[post_num] = Post(post_number=post_num)
+            # Получаем данные из строки
+            model = str(row[col_mapping['Модель']]).strip()
+            article = str(row[col_mapping['Артикул']]).strip()
+            name_en = str(row[col_mapping['Название_EN']]).strip()
+            name_ru = str(row[col_mapping['Название_RU']]).strip()
+            quantity = int(row[col_mapping['Количество']])
+            delivery_method = str(row[col_mapping['Доставка']]).strip().upper()
             
             # Определяем единицы измерения и конвертируем
             length_col = col_mapping['Длина']
@@ -1112,44 +1119,60 @@ def load_posts_from_excel(uploaded_file) -> List[Post]:
             width = float(row[width_col]) * conversion_factor
             height = float(row[height_col]) * conversion_factor
             
-            # Получаем название и артикул
-            name = str(row[col_mapping['Название']]).strip()
-            article = str(row[col_mapping['Артикул']]).strip() if col_mapping['Артикул'] in row.index else ""
-            
             # Пытаемся получить материал если есть
             material = ""
             if 'Материал' in df.columns:
                 material = str(row['Материал']).strip()
-            elif 'Линия' in df.columns:
-                material = str(row['Линия']).strip()
             else:
-                material = article  # Используем артикул как материал для группировки
+                material = model  # Используем модель как материал для группировки
             
             # Вес по умолчанию или из колонки
             weight = 10.0  # Вес по умолчанию
-            if 'Вес(кг)' in df.columns:
-                weight = float(row['Вес(кг)'])
-            elif 'STD Pack (MOQ)' in df.columns:
-                # Предполагаем вес пропорционален упаковке
-                weight = float(row['STD Pack (MOQ)']) * 0.5
+            if 'Вес(кг)' in df.columns or 'Вес' in df.columns:
+                weight_col = 'Вес(кг)' if 'Вес(кг)' in df.columns else 'Вес'
+                weight = float(row[weight_col])
             
-            # Создаем контейнер
-            container = Container(
-                id=f"{article}_{container_counter:03d}" if article else f"P{post_num}_C{container_counter:03d}",
-                name=name,
-                weight=weight,
-                length=length,
-                width=width,
-                height=height,
-                material=material,
-                post_number=post_num,
-                content=f"{article}: {name}" if article else name
-            )
+            # Проверяем, является ли товар тяжелым
+            is_heavy = False
+            heavy_value = str(row[col_mapping['Тяжелый']]).strip().upper()
+            is_heavy = heavy_value in ['ДА', 'YES', 'Y', 'Д', 'TRUE', '1']
             
-            posts_dict[post_num].containers.append(container)
-            container_counter += 1
+            # Определяем приоритетность по способу доставки
+            is_priority = delivery_method == 'NES'
+            
+            # Определяем предпочтительную полку
+            if is_heavy:
+                preferred_shelf = 1  # Тяжелые только на 1-й полке
+            elif delivery_method == 'NES':
+                preferred_shelf = 4  # NES на 4-й полке
+            else:
+                preferred_shelf = None
+            
+            # Создаем указанное количество контейнеров
+            for i in range(quantity):
+                suffix = f" ({i+1}/{quantity})" if quantity > 1 else ""
+                container = Container(
+                    id=f"{article}_{container_counter:03d}",
+                    name=f"{name_ru}{suffix}",
+                    weight=weight if not is_heavy else weight * 2,  # Увеличиваем вес для тяжелых
+                    length=length,
+                    width=width,
+                    height=height,
+                    quantity=quantity,
+                    material=material,
+                    post_number=model,
+                    priority_parts=is_priority,
+                    is_heavy=is_heavy,  # Устанавливаем флаг
+                    content=f"{model} | {article} | {name_en} | Доставка: {delivery_method} | {'ТЯЖЕЛЫЙ' if is_heavy else ''}"
+                )
+                # Добавляем информацию о предпочтительной полке
+                if preferred_shelf:
+                    container.shelf_level = preferred_shelf
+                
+                warehouse_post.containers.append(container)
+                container_counter += 1
         
-        return list(posts_dict.values())
+        return [warehouse_post] if warehouse_post.containers else []
     
     except Exception as e:
         st.error(f"Ошибка при загрузке Excel: {str(e)}")
@@ -1191,194 +1214,238 @@ def create_stacks_for_post(post: Post, base_length: float, base_width: float,
 
 def distribute_post_containers_by_material(post: Post, stacks: List[StorageStack]) -> Dict:
     """
-    Распределить коробки поста по стеллажам с строгой группировкой:
-    1. Сначала группируем по модели/артикулу
-    2. Внутри модели группируем по материалу
-    3. Ящики одной модели с одним материалом стоят строго друг за другом
+    Распределить коробки поста по стеллажам с новой логикой:
+    
+    Правила размещения:
+    1. Один артикул - все коробки в линию по глубине (ось Z)
+    2. Тяжелые → 1-я полка
+    3. Приоритетные (NES) → 3-4 полка (приоритет 4)
+    4. Зазор между артикулами по ширине (X) → 7 мм
+    5. Зазор по высоте (Y) → 150-200 мм от самой высокой тары до потолка полки
+    6. За артикулом по глубине (Z) → пустое место (недоступно)
+    7. Рядом по ширине (X) → можно другие артикулы
+    8. Максимальное заполнение пространства
+    
+    Система координат:
+    - X: ширина стеллажа
+    - Y: высота стеллажа (полки)
+    - Z: глубина стеллажа (длина)
     """
-    # Создаем составной ключ: артикул (из id) + материал
-    # Извлекаем артикул из ID контейнера (формат: "АРТИКУЛ_NNN")
+    
+    GAP_BETWEEN_ARTICLES = 0.7  # 7 мм в см между артикулами по ширине
+    
+    # Группируем по артикулу
     groups = {}
     for container in post.containers:
         # Получаем артикул из ID (до первого underscore)
         article = container.id.split('_')[0] if '_' in container.id else container.id
-        material = container.material or "unknown"
         
-        # Составной ключ: артикул + материал
-        group_key = f"{article}|{material}"
-        
-        if group_key not in groups:
-            groups[group_key] = {
-                'article': article,
-                'material': material,
-                'containers': []
-            }
-        groups[group_key].append(container)
+        if article not in groups:
+            groups[article] = []
+        groups[article].append(container)
     
-    # Сортируем группы:
-    # 1. По артикулу (алфавитный порядок)
-    # 2. По общему весу группы (тяжелые первыми)
-    sorted_groups = sorted(
+    # Сортируем артикулы по весу группы (тяжелые первыми) и алфавитно
+    sorted_articles = sorted(
         groups.items(),
-        key=lambda x: (x[1]['article'], -sum(c.weight for c in x[1]['containers']))
+        key=lambda x: (-sum(c.weight for c in x[1]), x[0])
     )
     
     placement_stats = {
         'total_containers': len(post.containers),
         'placed_containers': 0,
         'unplaced_containers': 0,
-        'by_material': {},
         'by_stack': {},
         'by_article': {},
         'placement_log': []
     }
     
-    current_stack_idx = 0
-    current_shelf_in_stack = {}  # Отслеживаем текущую полку на каждом стеллаже
-    
+    # Очищаем все полки перед размещением
     for stack in stacks:
-        current_shelf_in_stack[stack.name] = 0
+        for shelf in stack.shelves:
+            shelf.containers.clear()
     
-    for group_key, group_data in sorted_groups:
-        article = group_data['article']
-        material = group_data['material']
-        containers_list = group_data['containers']
+    # Переменные для отслеживания позиции
+    current_stack_idx = 0
+    current_shelf_idx = 0
+    current_x_position = 0  # Текущая позиция по ширине (X)
+    
+    # Размещаем каждую группу артикулов
+    for article, containers_list in sorted_articles:
+        # Определяем предпочтительную полку для группы
+        preferred_shelf_level = None
+        is_heavy = False
+        is_nes = False
         
-        # Сортируем контейнеры в группе по весу (тяжелые вниз)
-        containers_list.sort(key=lambda x: x.weight, reverse=True)
+        # Проверяем первый контейнер группы на специальные условия
+        if containers_list:
+            first_container = containers_list[0]
+            # Тяжелые на 1 полку - проверяем через флаг is_heavy
+            if hasattr(first_container, 'is_heavy') and first_container.is_heavy:
+                preferred_shelf_level = 0  # Индекс 0 = 1-я полка
+                is_heavy = True
+            # NES на 3-4 полку (приоритет 4)
+            elif hasattr(first_container, 'priority_parts') and first_container.priority_parts:
+                preferred_shelf_level = 3  # Индекс 3 = 4-я полка (приоритет)
+                is_nes = True
         
-        group_stats = {'placed': 0, 'not_placed': 0}
+        # Рассчитываем размеры группы
+        # Каждый контейнер размещается индивидуально
+        # Ширина группы = ширина одного контейнера (все одинаковые в артикуле)
+        # Глубина = глубина одного контейнера
+        max_width = max(c.width for c in containers_list)  # width = ширина одного контейнера (X)
+        max_depth = max(c.length for c in containers_list)  # length = глубина одного контейнера (Z)
+        max_height = max(c.height for c in containers_list)  # height = высота (Y)
         
-        # Размещаем ВСЕ контейнеры группы последовательно
-        for container in containers_list:
-            placed = False
-            
-            # Пытаемся разместить на текущем стеллаже
-            if current_stack_idx < len(stacks):
-                stack = stacks[current_stack_idx]
+        # Размещаем каждый контейнер группы
+        containers_to_place = list(containers_list)
+        max_new_stacks = 50  # Ограничение на создание новых стеллажей
+        new_stacks_created = 0
+        
+        while containers_to_place:
+            container = containers_to_place[0]
+            container_placed = False
+        
+            for stack_idx in range(current_stack_idx, len(stacks)):
+                if container_placed:
+                    break
+                    
+                stack = stacks[stack_idx]
                 available_shelves = [s for s in stack.shelves if not s.reserved_for_empty]
                 
-                # Пытаемся разместить начиная с текущей полки
-                for shelf_idx in range(current_shelf_in_stack[stack.name], len(available_shelves)):
+                # Определяем с какой полки начинать
+                start_shelf_idx = current_shelf_idx if stack_idx == current_stack_idx else 0
+                
+                # Если есть предпочтительная полка, пытаемся сначала её
+                if preferred_shelf_level is not None and preferred_shelf_level < len(available_shelves):
+                    shelf_indices = [preferred_shelf_level] + [i for i in range(len(available_shelves)) if i != preferred_shelf_level]
+                else:
+                    shelf_indices = list(range(start_shelf_idx, len(available_shelves)))
+                
+                for shelf_idx in shelf_indices:
+                    if shelf_idx >= len(available_shelves):
+                        continue
                     shelf = available_shelves[shelf_idx]
                     
-                    if shelf.can_add_container(container):
-                        shelf.add_container(container)
-                        container.placement_info = {
-                            'stack': stack.name,
-                            'shelf': shelf.level,
-                            'x': 0,  # Упрощенно
-                            'y': shelf.level * post.optimal_shelf_height
-                        }
-                        placed = True
-                        placement_stats['placed_containers'] += 1
-                        group_stats['placed'] += 1
+                    # Проверяем, помещается ли по глубине
+                    if max_depth > stack.base_length:
+                        continue
+                    
+                    # Проверяем высоту с учетом зазора
+                    if max_height + 17.5 > shelf.height:
+                        continue
+                    
+                    # Проверяем вес
+                    current_shelf_weight = sum(c.weight for c in shelf.containers)
+                    if current_shelf_weight + container.weight > shelf.max_weight:
+                        continue
+                    
+                    # Проверяем, помещается ли по ширине на текущей позиции X
+                    if stack_idx == current_stack_idx and shelf_idx == current_shelf_idx:
+                        # Продолжаем от текущей позиции X
+                        # Проверяем с учетом зазора только если это не первый артикул на полке
+                        gap = GAP_BETWEEN_ARTICLES if current_x_position > 0 else 0
+                        if current_x_position + gap + container.width > stack.base_width:
+                            # Не помещается, переходим на новую полку/стеллаж
+                            continue
+                        x_start = current_x_position + gap
+                    else:
+                        # Новая полка, начинаем с X = 0
+                        if container.width > stack.base_width:
+                            continue
+                        x_start = 0
+                    
+                    # Размещаем контейнер
+                    container.x_pos = x_start
+                    container.y_pos = shelf_idx * (max_height + 17.5)
+                    container.z_pos = 0  # Все контейнеры начинаются с Z=0
+                    container.shelf_level = shelf_idx + 1
+                    
+                    # Добавляем на полку
+                    shelf.containers.append(container)
+                    
+                    # Статистика
+                    placement_stats['placed_containers'] += 1
+                    
+                    if stack.name not in placement_stats['by_stack']:
+                        placement_stats['by_stack'][stack.name] = 0
+                    placement_stats['by_stack'][stack.name] += 1
+                    
+                    if article not in placement_stats['by_article']:
+                        placement_stats['by_article'][article] = 0
+                    placement_stats['by_article'][article] += 1
+                    
+                    placement_stats['placement_log'].append({
+                        'container': container.name,
+                        'article': article,
+                        'stack': stack.name,
+                        'shelf': shelf_idx + 1,
+                        'position': f"X:{x_start:.1f} Y:{container.y_pos:.1f} Z:0.0",
+                        'weight': container.weight
+                    })
+                    
+                    # Контейнер размещен успешно
+                    container_placed = True
+                    containers_to_place.pop(0)
+                    
+                    current_stack_idx = stack_idx
+                    current_shelf_idx = shelf_idx
+                    current_x_position = x_start + container.width
+                    
+                    # Если достигли края по ширине, переходим на следующую полку
+                    min_article_width = 10
+                    if current_x_position + GAP_BETWEEN_ARTICLES + min_article_width > stack.base_width:
+                        current_shelf_idx += 1
+                        current_x_position = 0
                         
-                        # Обновляем статистику
-                        if stack.name not in placement_stats['by_stack']:
-                            placement_stats['by_stack'][stack.name] = 0
-                        placement_stats['by_stack'][stack.name] += 1
-                        
-                        if article not in placement_stats['by_article']:
-                            placement_stats['by_article'][article] = 0
-                        placement_stats['by_article'][article] += 1
-                        
-                        placement_stats['placement_log'].append({
-                            'container': container.name,
-                            'article': article,
-                            'material': material,
-                            'stack': stack.name,
-                            'shelf': shelf.level,
-                            'weight': container.weight
-                        })
-                        
-                        # Обновляем текущую полку для этого стеллажа
-                        current_shelf_in_stack[stack.name] = shelf_idx
-                        break
+                        # Если полки закончились, переходим на следующий стеллаж
+                        if current_shelf_idx >= len(available_shelves):
+                            current_stack_idx += 1
+                            current_shelf_idx = 0
+                            current_x_position = 0
+                    
+                    break
+            
+            # Если контейнер не размещен - пробуем создать новый стеллаж или отмечаем как неразмещенный
+            if not container_placed:
+                # Проверяем, может ли контейнер физически поместиться (не слишком большой)
+                max_possible_depth = max(s.base_length for s in stacks) if stacks else 130
+                max_possible_width = max(s.base_width for s in stacks) if stacks else 130
                 
-                # Если не поместилось на текущей полке, переходим к следующей
-                if not placed and current_shelf_in_stack[stack.name] < len(available_shelves) - 1:
-                    current_shelf_in_stack[stack.name] += 1
-                    # Повторяем попытку на следующей полке
-                    shelf = available_shelves[current_shelf_in_stack[stack.name]]
-                    if shelf.can_add_container(container):
-                        shelf.add_container(container)
-                        container.placement_info = {
-                            'stack': stack.name,
-                            'shelf': shelf.level,
-                            'x': 0,
-                            'y': shelf.level * post.optimal_shelf_height
-                        }
-                        placed = True
-                        placement_stats['placed_containers'] += 1
-                        group_stats['placed'] += 1
-                        
-                        if stack.name not in placement_stats['by_stack']:
-                            placement_stats['by_stack'][stack.name] = 0
-                        placement_stats['by_stack'][stack.name] += 1
-                        
-                        if article not in placement_stats['by_article']:
-                            placement_stats['by_article'][article] = 0
-                        placement_stats['by_article'][article] += 1
-                        
-                        placement_stats['placement_log'].append({
-                            'container': container.name,
-                            'article': article,
-                            'material': material,
-                            'stack': stack.name,
-                            'shelf': shelf.level,
-                            'weight': container.weight
-                        })
-            
-            if not placed:
-                # Переходим к следующему стеллажу
-                current_stack_idx += 1
-                if current_stack_idx < len(stacks):
-                    current_shelf_in_stack[stacks[current_stack_idx].name] = 0
-                    # Повторяем попытку на новом стеллаже
-                    stack = stacks[current_stack_idx]
-                    available_shelves = [s for s in stack.shelves if not s.reserved_for_empty]
-                    if available_shelves:
-                        shelf = available_shelves[0]
-                        if shelf.can_add_container(container):
-                            shelf.add_container(container)
-                            container.placement_info = {
-                                'stack': stack.name,
-                                'shelf': shelf.level,
-                                'x': 0,
-                                'y': shelf.level * post.optimal_shelf_height
-                            }
-                            placed = True
-                            placement_stats['placed_containers'] += 1
-                            group_stats['placed'] += 1
-                            
-                            if stack.name not in placement_stats['by_stack']:
-                                placement_stats['by_stack'][stack.name] = 0
-                            placement_stats['by_stack'][stack.name] += 1
-                            
-                            if article not in placement_stats['by_article']:
-                                placement_stats['by_article'][article] = 0
-                            placement_stats['by_article'][article] += 1
-                            
-                            placement_stats['placement_log'].append({
-                                'container': container.name,
-                                'article': article,
-                                'material': material,
-                                'stack': stack.name,
-                                'shelf': shelf.level,
-                                'weight': container.weight
-                            })
-            
-            if not placed:
-                placement_stats['unplaced_containers'] += 1
-                group_stats['not_placed'] += 1
-        
-        # Статистика по материалам
-        material_key = f"{article}_{material}"
-        placement_stats['by_material'][material_key] = group_stats
-        
-        # После размещения группы НЕ переходим к следующему стеллажу
-        # Продолжаем заполнять текущий стеллаж следующей группой
+                # Если контейнер физически не помещается ни на какой стеллаж
+                if container.length > max_possible_depth or container.width > max_possible_width:
+                    placement_stats['unplaced_containers'] += 1
+                    containers_to_place.pop(0)
+                    continue
+                
+                # Проверяем ограничение на создание новых стеллажей
+                if new_stacks_created >= max_new_stacks:
+                    placement_stats['unplaced_containers'] += 1
+                    containers_to_place.pop(0)
+                    continue
+                
+                # Создаем новый стеллаж
+                new_stack_idx = len(stacks) + 1
+                new_stack = StorageStack(
+                    name=f"Пост_{post.post_number}_Стеллаж_{new_stack_idx}",
+                    base_length=stacks[0].base_length if stacks else 130,
+                    base_width=stacks[0].base_width if stacks else 130
+                )
+                
+                # Добавляем полки как в первом стеллаже
+                if stacks:
+                    for shelf in stacks[0].shelves:
+                        new_stack.add_shelf(
+                            max_weight=shelf.max_weight,
+                            height=shelf.height,
+                            reserved_for_empty=shelf.reserved_for_empty
+                        )
+                
+                stacks.append(new_stack)
+                new_stacks_created += 1
+                
+                # НЕ меняем current_stack_idx - пусть цикл for сам дойдет до нового стеллажа
+                # Повторяем цикл while для размещения на новом стеллаже
+                continue
     
     return placement_stats
 
@@ -1597,9 +1664,21 @@ def main():
         
         col1, col2 = st.columns(2)
         with col1:
-            base_length = st.number_input("Длина (см)", min_value=50, value=200, step=10)
+            base_length = st.number_input("Длина (см)", min_value=50, value=200, step=10, key="base_length_input")
         with col2:
-            base_width = st.number_input("Ширина (см)", min_value=50, value=120, step=10)
+            base_width = st.number_input("Ширина (см)", min_value=50, value=120, step=10, key="base_width_input")
+        
+        # Кнопка применить параметры
+        if st.button("✅ Применить параметры", use_container_width=True, type="primary", key="apply_params_btn"):
+            if st.session_state.warehouse:
+                # Обновляем размеры всех стеллажей
+                for stack in st.session_state.warehouse.stacks:
+                    stack.base_length = base_length
+                    stack.base_width = base_width
+                st.success(f"✅ Параметры применены: {base_length}×{base_width} см")
+                st.rerun()
+            else:
+                st.warning("⚠️ Сначала создайте склад или загрузите данные")
         
         # Раздел сохранения/загрузки
         st.markdown("---")
@@ -1666,7 +1745,9 @@ def main():
             
             with col3:
                 height = st.number_input("Высота (см)", min_value=10, value=40, step=5)
-                is_empty = st.checkbox("Пустая тара")
+                quantity = st.number_input("Количество ящиков", min_value=1, value=1, step=1)
+            
+            is_empty = st.checkbox("Пустая тара")
             
             if not is_empty:
                 col1, col2 = st.columns(2)
@@ -1679,20 +1760,24 @@ def main():
                 content = ""
             
             if st.button("➕ Добавить тару", type="primary"):
-                container = Container(
-                    id=f"T{st.session_state.container_counter:03d}",
-                    name=container_name,
-                    weight=weight,
-                    length=length,
-                    width=width,
-                    height=height,
-                    is_empty=is_empty,
-                    priority_parts=priority,
-                    content=content
-                )
-                st.session_state.containers.append(container)
-                st.session_state.container_counter += 1
-                st.success(f"✅ Тара '{container_name}' добавлена!")
+                # Создаем несколько одинаковых тар в соответствии с количеством
+                for i in range(quantity):
+                    suffix = f" ({i+1}/{quantity})" if quantity > 1 else ""
+                    container = Container(
+                        id=f"T{st.session_state.container_counter:03d}",
+                        name=container_name + suffix,
+                        weight=weight,
+                        length=length,
+                        width=width,
+                        height=height,
+                        quantity=quantity,
+                        is_empty=is_empty,
+                        priority_parts=priority,
+                        content=content
+                    )
+                    st.session_state.containers.append(container)
+                    st.session_state.container_counter += 1
+                st.success(f"✅ Добавлено {quantity} тар(ы) '{container_name}'!")
                 st.rerun()
             
             st.markdown("---")
@@ -1715,6 +1800,7 @@ def main():
                     containers_data.append({
                         'ID': c.id,
                         'Название': c.name,
+                        'Количество': c.quantity if hasattr(c, 'quantity') else 1,
                         'Стеллаж': stack_name,
                         'Полка': f"Полка {c.shelf_level}" if c.shelf_level is not None else "-",
                         'Размеры (ДxШxВ)': f"{c.length}x{c.width}x{c.height}",
@@ -1775,72 +1861,87 @@ def main():
                 st.info("Список тар пуст. Добавьте тары выше.")
     
     with tab2:
-        if warehouse is None:
-            st.info("👈 Сначала загрузите Excel файл с постами на вкладке 'Работа с Постами' или загрузите сохраненную конфигурацию")
+        if warehouse is None or (not warehouse.stacks and not st.session_state.get('posts_data')):
+            st.info("👈 Сначала загрузите Excel файл с постами на вкладке 'Работа с Постами' или добавьте тары на вкладке 'Управление Тарами'")
         else:
             st.header("3D Визуализация Стеллажей")
             
-            # Выбор стеллажа для визуализации
-            stack_names = [s.name for s in warehouse.stacks]
-            selected_stack_name = st.selectbox("Выберите стеллаж для визуализации", stack_names)
-            selected_stack = next(s for s in warehouse.stacks if s.name == selected_stack_name)
+            # Проверяем есть ли посты с размещенными стеллажами
+            posts_data = st.session_state.get('posts_data', [])
+            all_stacks = []
             
-            if any(shelf.containers for shelf in selected_stack.shelves):
-                # Информационная панель
-                col1, col2, col3, col4 = st.columns(4)
-                
-                with col1:
-                    st.markdown("### 🔵 Обычные тары")
-                    st.caption("Синий цвет")
-                with col2:
-                    st.markdown("### 🟠 Приоритетные")
-                    st.caption("Оранжевый цвет")
-                with col3:
-                    st.markdown("### ⚪ Пустые (буфер)")
-                    st.caption("Серый цвет")
-                with col4:
-                    total_tars = sum(len(s.containers) for s in selected_stack.shelves)
-                    st.metric("Тар на стеллаже", total_tars)
-                
-                st.markdown("---")
-                
-                # 3D визуализация
-                with st.spinner("Создание 3D модели..."):
-                    fig = create_3d_visualization(selected_stack)
-                    st.plotly_chart(fig, use_container_width=True)
-                
-                st.info("💡 **Управление:** Вращайте мышью | Zoom: колесико | Наведите на тару для деталей")
-                
-                st.markdown("---")
-                
-                # Диаграмма использования
-                st.subheader("📊 Диаграмма использования полок")
-                fig_util = create_utilization_chart(selected_stack)
-                st.plotly_chart(fig_util, use_container_width=True)
-                
-                st.markdown("---")
-                st.subheader("📐 Параметры стеллажа")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.write(f"**Длина:** {selected_stack.base_length} см")
-                    st.write(f"**Ширина:** {selected_stack.base_width} см")
-                with col2:
-                    total_height = sum(s.height for s in selected_stack.shelves)
-                    st.write(f"**Общая высота:** {total_height} см")
-                    st.write(f"**Полок:** {len(selected_stack.shelves)}")
-                with col3:
-                    stats = selected_stack.get_statistics()
-                    st.write(f"**Площадь основания:** {selected_stack.base_length * selected_stack.base_width / 10000:.2f} м²")
-                    st.write(f"**Общий объем:** {selected_stack.base_length * selected_stack.base_width * total_height / 1000000:.2f} м³")
+            # Собираем стеллажи из постов
+            for post in posts_data:
+                if hasattr(post, 'stacks') and post.stacks:
+                    all_stacks.extend(post.stacks)
+            
+            # Добавляем стеллажи из warehouse если есть
+            if warehouse and warehouse.stacks:
+                all_stacks.extend(warehouse.stacks)
+            
+            if not all_stacks:
+                st.warning("⚠️ Нет доступных стеллажей для визуализации. Загрузите Excel с постами и нажмите 'Разместить тары'.")
             else:
-                st.info("📦 Сначала разместите тары на вкладке 'Управление Тарами'")
-                st.markdown("""
-                ### Как начать:
-                1. Перейдите на вкладку **"Управление Тарами"**
-                2. Нажмите **"Загрузить пример"** для быстрого теста
-                3. Нажмите **"Распределить по складу"**
-                4. Вернитесь сюда для просмотра 3D модели
-                """)
+                stack_names = [s.name for s in all_stacks]
+                selected_stack_name = st.selectbox("Выберите стеллаж для визуализации", stack_names)
+                selected_stack = next(s for s in all_stacks if s.name == selected_stack_name)
+                
+                if any(shelf.containers for shelf in selected_stack.shelves):
+                    # Информационная панель
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.markdown("### 🔵 Обычные тары")
+                        st.caption("Синий цвет")
+                    with col2:
+                        st.markdown("### 🟠 Приоритетные")
+                        st.caption("Оранжевый цвет")
+                    with col3:
+                        st.markdown("### ⚪ Пустые (буфер)")
+                        st.caption("Серый цвет")
+                    with col4:
+                        total_tars = sum(len(s.containers) for s in selected_stack.shelves)
+                        st.metric("Тар на стеллаже", total_tars)
+                    
+                    st.markdown("---")
+                    
+                    # 3D визуализация
+                    with st.spinner("Создание 3D модели..."):
+                        fig = create_3d_visualization(selected_stack)
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    st.info("💡 **Управление:** Вращайте мышью | Zoom: колесико | Наведите на тару для деталей")
+                    
+                    st.markdown("---")
+                    
+                    # Диаграмма использования
+                    st.subheader("📊 Диаграмма использования полок")
+                    fig_util = create_utilization_chart(selected_stack)
+                    st.plotly_chart(fig_util, use_container_width=True)
+                    
+                    st.markdown("---")
+                    st.subheader("📐 Параметры стеллажа")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.write(f"**Длина:** {selected_stack.base_length} см")
+                        st.write(f"**Ширина:** {selected_stack.base_width} см")
+                    with col2:
+                        total_height = sum(s.height for s in selected_stack.shelves)
+                        st.write(f"**Общая высота:** {total_height} см")
+                        st.write(f"**Полок:** {len(selected_stack.shelves)}")
+                    with col3:
+                        stats = selected_stack.get_statistics()
+                        st.write(f"**Площадь основания:** {selected_stack.base_length * selected_stack.base_width / 10000:.2f} м²")
+                        st.write(f"**Общий объем:** {selected_stack.base_length * selected_stack.base_width * total_height / 1000000:.2f} м³")
+                else:
+                    st.info("📦 На выбранном стеллаже нет размещенных тар")
+                    st.markdown("""
+                    ### Как разместить тары:
+                    1. Перейдите на вкладку **"Работа с Постами"**
+                    2. Загрузите Excel файл с данными
+                    3. Нажмите **"Создать стеллажи для поста"**
+                    4. Вернитесь сюда для просмотра 3D модели
+                    """)
     
     with tab3:
         if warehouse is None:
@@ -1999,26 +2100,42 @@ def main():
     
     # Вкладка "Работа с Постами"
     with tab5:
-        st.header("🏭 Работа с Постами")
-        st.markdown("""
-        Загрузите Excel файл с постами для автоматического расчета и расстановки тар по стеллажам.
+
+        # Пример формата Excel файла
+        st.subheader("📋 Пример формата Excel файла")
+        example_data = {
+            'Модель': ['MX-500', 'KX-200', 'TX-100'],
+            'Артикул': ['ART-001', 'ART-002', 'ART-003'],
+            'Наименование на английском': ['Mechanical Switch', 'Keyboard Case', 'Keycap Set'],
+            'Наименование на русском': ['Механический переключатель', 'Корпус клавиатуры', 'Набор клавиш'],
+            'Количество коробок': [5, 3, 10],
+            'Длина (мм)': [300, 450, 250],
+            'Ширина (мм)': [200, 350, 200],
+            'Высота (мм)': [150, 100, 120],
+            'Тяжелый': ['Да', 'Нет', 'Нет'],
+            'Способ доставки': ['NES', 'AIR', 'NES']
+        }
+        df_example = pd.DataFrame(example_data)
         
-        **Требования к Excel файлу:**
-        - **Обязательные столбцы:** 
-          - `Пост` - номер поста
-          - `Наименование на русском языке` (или `Название`) - название детали
-          - `Артикул` (или `Model`) - артикул детали
-          - `L(mm)`, `W(mm)`, `H(mm)` - размеры в миллиметрах (будут автоматически конвертированы в см)
-        - **Опциональные столбцы:** `Линия`, `Материал`, `Вес(кг)`, `STD Pack (MOQ)` и др.
-        - Каждая строка - одна позиция/тара
-        - Группировка по постам и линиям происходит автоматически
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.dataframe(df_example, use_container_width=True, hide_index=True)
+        with col2:
+            # Создаем Excel файл для скачивания
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df_example.to_excel(writer, sheet_name='Пример', index=False)
+            excel_data = output.getvalue()
+            
+            st.download_button(
+                label="📥 Скачать пример",
+                data=excel_data,
+                file_name="primer_sklada_shablon.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
         
-        **Правила размещения:**
-        - ✅ Автоматический расчет оптимальной высоты стеллажа (макс. высота тары + 15-20 см)
-        - ✅ Автоматический расчет необходимого количества стеллажей для каждого поста
-        - ✅ Тары с одинаковым материалом/линией размещаются рядом друг с другом (в длину)
-        - ✅ Соблюдение всех стандартных правил (тяжелые снизу, приоритетные доступны, пустые сверху)
-        """)
+        st.info("💡 **Важно:** Тяжелые товары (Да) размещаются только на 1-й полке")
         
         st.markdown("---")
         
@@ -2026,7 +2143,7 @@ def main():
         uploaded_excel = st.file_uploader(
             "📂 Загрузите Excel файл с постами",
             type=['xlsx', 'xls'],
-            help="Файл должен содержать столбцы: Пост, Наименование на русском языке, Артикул, L(mm), W(mm), H(mm)",
+            help="Файл должен содержать столбцы: Модель, Артикул, Наименование на английском, Наименование на русском, Количество коробок, Длина (мм), Ширина (мм), Высота (мм), Тяжелый (Да/Нет), Способ доставки",
             key="upload_posts_excel"
         )
         
@@ -2108,14 +2225,25 @@ def main():
                     st.markdown("---")
                     st.subheader("⚙️ Параметры полок")
                     
-                    post_num_shelves = st.number_input(
-                        "Количество полок",
-                        min_value=3,
-                        max_value=10,
-                        value=5,
-                        step=1,
-                        key="post_num_shelves"
-                    )
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        post_num_shelves = st.number_input(
+                            "Количество полок",
+                            min_value=3,
+                            max_value=10,
+                            value=5,
+                            step=1,
+                            key="post_num_shelves"
+                        )
+                    with col2:
+                        post_shelf_max_weight = st.number_input(
+                            "Макс. вес полки (кг)",
+                            min_value=50.0,
+                            max_value=500.0,
+                            value=200.0,
+                            step=10.0,
+                            key="post_shelf_max_weight"
+                        )
                     
                     # Кнопка создания стеллажей
                     if st.button("🔧 Создать стеллажи для поста", type="primary", use_container_width=True, key="create_post_stacks"):
@@ -2127,7 +2255,8 @@ def main():
                             selected_post,
                             base_length,
                             base_width,
-                            post_num_shelves
+                            post_num_shelves,
+                            post_shelf_max_weight
                         )
                         
                         # Создаем временный склад для поста
@@ -2165,7 +2294,8 @@ def main():
                         
                         placement_data = []
                         for container in selected_post.containers:
-                            if hasattr(container, 'placement_info') and container.placement_info:
+                            # Проверяем размещен ли контейнер (есть координаты)
+                            if hasattr(container, 'x_pos') and hasattr(container, 'shelf_level'):
                                 # Извлекаем артикул из ID
                                 article = container.id.split('_')[0] if '_' in container.id else container.id
                                 
@@ -2175,9 +2305,9 @@ def main():
                                     'Материал': container.material or 'Не указан',
                                     'Вес (кг)': f"{container.weight:.1f}",
                                     'Размеры (см)': f"{container.length}×{container.width}×{container.height}",
-                                    'Стеллаж': container.placement_info['stack'],
-                                    'Полка': container.placement_info['shelf'],
-                                    'Позиция (см)': f"({container.placement_info['x']:.1f}, {container.placement_info['y']:.1f})"
+                                    'Стеллаж': f"Стеллаж {container.shelf_level}",
+                                    'Полка': container.shelf_level,
+                                    'Позиция (см)': f"({container.x_pos:.1f}, {container.y_pos:.1f}, {container.z_pos:.1f})"
                                 })
                         
                         if placement_data:
@@ -2190,7 +2320,8 @@ def main():
                             # Собираем данные по артикулам
                             article_groups = {}
                             for c in selected_post.containers:
-                                if hasattr(c, 'placement_info') and c.placement_info:
+                                # Проверяем размещен ли контейнер (есть координаты)
+                                if hasattr(c, 'x_pos') and hasattr(c, 'shelf_level'):
                                     # Извлекаем артикул из ID
                                     article = c.id.split('_')[0] if '_' in c.id else c.id
                                     material = c.material or "unknown"
@@ -2204,7 +2335,9 @@ def main():
                                             'stacks': set()
                                         }
                                     article_groups[key]['containers'].append(c)
-                                    article_groups[key]['stacks'].add(c.placement_info['stack'])
+                                    # Получаем имя стеллажа из post_number контейнера
+                                    stack_name = f"Стеллаж {c.shelf_level}" if hasattr(c, 'shelf_level') else "Неизвестно"
+                                    article_groups[key]['stacks'].add(stack_name)
                             
                             # Показываем группировку
                             for key in sorted(article_groups.keys()):
@@ -2220,24 +2353,7 @@ def main():
                 st.error(f"❌ Ошибка при обработке файла: {str(e)}")
                 st.exception(e)
         else:
-            st.info("👆 Загрузите Excel файл для начала работы с постами")
-            
-            # Пример формата Excel
-            with st.expander("📄 Пример формата Excel файла"):
-                st.markdown("""
-                | Model | Артикул | Наименование на русском языке | Линия | Пост | L(mm) | W(mm) | H(mm) | STD Pack (MOQ) |
-                |-------|---------|-------------------------------|--------|------|-------|-------|-------|----------------|
-                | A123 | ART-001 | Деталь А1 | Линия 1 | П-001 | 800 | 600 | 400 | 10 |
-                | A124 | ART-002 | Деталь А2 | Линия 1 | П-001 | 750 | 580 | 380 | 12 |
-                | B201 | ART-101 | Компонент Б1 | Линия 2 | П-002 | 900 | 650 | 450 | 8 |
-                | C301 | ART-201 | Узел С1 | Линия 3 | П-003 | 700 | 500 | 300 | 20 |
-                
-                **Примечание:** 
-                - Размеры указываются в миллиметрах (мм) - автоматически конвертируются в сантиметры
-                - Если нет колонки "Материал", используется "Линия" для группировки
-                - Пример файла: `пример_посты_новый.xlsx`
-                """)
-                st.caption("Система автоматически определяет нужные колонки по их названиям")
+            st.info("👆 Загрузите Excel файл для начала работы с постами")           
 
 
 if __name__ == "__main__":
